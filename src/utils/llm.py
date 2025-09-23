@@ -1,10 +1,40 @@
 """Helper functions for LLM"""
 
+import concurrent.futures
 import json
+import os
+
 from pydantic import BaseModel
+
+from src.graph.state import AgentState
 from src.llm.models import get_model, get_model_info
 from src.utils.progress import progress
-from src.graph.state import AgentState
+
+
+def _parse_timeout(value: str | None, default: float) -> float | None:
+    """Parse timeout values allowing <=0 to disable the timeout."""
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return None if parsed <= 0 else parsed
+
+
+def _parse_positive_int(value: str | None, default: int) -> int:
+    """Parse a positive integer, falling back to default when parsing fails."""
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+LLM_CALL_TIMEOUT_SECONDS = _parse_timeout(os.getenv("LLM_CALL_TIMEOUT_SECONDS"), 120.0)
+LLM_MAX_RETRIES = _parse_positive_int(os.getenv("LLM_MAX_RETRIES"), 3)
 
 
 def call_llm(
@@ -12,7 +42,7 @@ def call_llm(
     pydantic_model: type[BaseModel],
     agent_name: str | None = None,
     state: AgentState | None = None,
-    max_retries: int = 3,
+    max_retries: int | None = None,
     default_factory=None,
 ) -> BaseModel:
     """
@@ -55,11 +85,12 @@ def call_llm(
             method="json_mode",
         )
 
+    retries = max_retries if max_retries is not None else LLM_MAX_RETRIES
     # Call the LLM with retries
-    for attempt in range(max_retries):
+    for attempt in range(retries):
         try:
             # Call the LLM
-            result = llm.invoke(prompt)
+            result = _invoke_with_timeout(llm, prompt, LLM_CALL_TIMEOUT_SECONDS)
 
             # For non-JSON support models, we need to extract and parse the JSON manually
             if model_info and not model_info.has_json_mode():
@@ -69,12 +100,24 @@ def call_llm(
             else:
                 return result
 
+        except TimeoutError as exc:
+            if agent_name:
+                progress.update_status(
+                    agent_name,
+                    None,
+                    f"LLM timeout after {LLM_CALL_TIMEOUT_SECONDS}s - retry {attempt + 1}/{retries}",
+                )
+            if attempt == retries - 1:
+                print(f"Timeout in LLM call after {retries} attempts: {exc}")
+                if default_factory:
+                    return default_factory()
+                return create_default_response(pydantic_model)
         except Exception as e:
             if agent_name:
-                progress.update_status(agent_name, None, f"Error - retry {attempt + 1}/{max_retries}")
+                progress.update_status(agent_name, None, f"Error - retry {attempt + 1}/{retries}")
 
-            if attempt == max_retries - 1:
-                print(f"Error in LLM call after {max_retries} attempts: {e}")
+            if attempt == retries - 1:
+                print(f"Error in LLM call after {retries} attempts: {e}")
                 # Use default_factory if provided, otherwise create a basic default
                 if default_factory:
                     return default_factory()
@@ -119,6 +162,20 @@ def extract_json_from_response(content: str) -> dict | None:
     except Exception as e:
         print(f"Error extracting JSON from response: {e}")
     return None
+
+
+def _invoke_with_timeout(llm, prompt, timeout_seconds: float | None):
+    """Invoke the LLM with an optional timeout to avoid hanging the workflow."""
+    if not timeout_seconds:
+        return llm.invoke(prompt)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(llm.invoke, prompt)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(f"LLM call exceeded {timeout_seconds} seconds") from exc
 
 
 def get_agent_model_config(state, agent_name):

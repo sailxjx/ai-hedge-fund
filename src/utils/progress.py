@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+from pathlib import Path
+import json
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
@@ -18,6 +20,8 @@ class AgentProgress:
         self.live = Live(self.table, console=console, refresh_per_second=4)
         self.started = False
         self.update_handlers: List[Callable[[str, Optional[str], str], None]] = []
+        self._log_path = Path("log") / "backtest_progress.log"
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def register_handler(self, handler: Callable[[str, Optional[str], str], None]):
         """Register a handler to be called when agent status updates."""
@@ -54,12 +58,36 @@ class AgentProgress:
             self.agent_status[agent_name]["analysis"] = analysis
         
         # Set the timestamp as UTC datetime
-        timestamp = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+        timestamp = now.isoformat()
+        previous = self.agent_status[agent_name].get("_last_update_dt")
+        if isinstance(previous, datetime):
+            elapsed = (now - previous).total_seconds()
+        else:
+            elapsed = None
         self.agent_status[agent_name]["timestamp"] = timestamp
+        self.agent_status[agent_name]["_last_update_dt"] = now
 
         # Notify all registered handlers
         for handler in self.update_handlers:
             handler(agent_name, ticker, status, analysis, timestamp)
+
+        log_entry = {
+            "timestamp": timestamp,
+            "agent": agent_name,
+            "ticker": self.agent_status[agent_name].get("ticker"),
+            "status": self.agent_status[agent_name].get("status"),
+        }
+        if analysis:
+            log_entry["analysis"] = analysis[:500]
+        if elapsed is not None:
+            log_entry["elapsed_since_last"] = elapsed
+
+        try:
+            with self._log_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(json.dumps(log_entry) + "\n")
+        except OSError:
+            pass
 
         self._refresh_display()
 

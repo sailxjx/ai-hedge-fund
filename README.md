@@ -63,7 +63,7 @@ cd ai-hedge-fund
 
 ### 2. Set up API keys
 
-Create a `.env` file for your API keys:
+Create a `.env` file for your API keys and optional tuning knobs:
 ```bash
 # Create .env file for your API keys (in the root directory)
 cp .env.example .env
@@ -76,6 +76,12 @@ OPENAI_API_KEY=your-openai-api-key
 
 # For getting financial data to power the hedge fund
 FINANCIAL_DATASETS_API_KEY=your-financial-datasets-api-key
+
+# Optional: constrain company-news fetches to avoid long hangs
+# Seconds spent gathering paginated news per ticker (default 60)
+COMPANY_NEWS_FETCH_TIMEOUT_SECONDS=60
+# Maximum news pages per ticker (default 8)
+COMPANY_NEWS_MAX_PAGES=8
 ```
 
 **Important**: You must set at least one LLM API key (e.g. `OPENAI_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, or `DEEPSEEK_API_KEY`) for the hedge fund to work. 

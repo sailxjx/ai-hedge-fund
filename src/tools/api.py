@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import requests
 import time
+from requests import exceptions as requests_exceptions
 
 from src.data.cache import get_cache
 from src.data.models import (
@@ -23,7 +24,41 @@ from src.data.models import (
 _cache = get_cache()
 
 
-def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: dict = None, max_retries: int = 3) -> requests.Response:
+def _parse_timeout(env_var: str, default: float) -> float:
+    value = os.environ.get(env_var)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _parse_positive_int(env_var: str, default: int) -> int:
+    value = os.environ.get(env_var)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+        return parsed if parsed > 0 else default
+    except ValueError:
+        return default
+
+
+COMPANY_NEWS_TIMEOUT_SECONDS = _parse_timeout("COMPANY_NEWS_TIMEOUT_SECONDS", 10.0)
+COMPANY_NEWS_FETCH_TIMEOUT_SECONDS = _parse_timeout("COMPANY_NEWS_FETCH_TIMEOUT_SECONDS", 60.0)
+COMPANY_NEWS_MAX_PAGES = _parse_positive_int("COMPANY_NEWS_MAX_PAGES", 8)
+DEFAULT_API_REQUEST_TIMEOUT_SECONDS = _parse_timeout("DEFAULT_API_REQUEST_TIMEOUT_SECONDS", 30.0)
+
+
+def _make_api_request(
+    url: str,
+    headers: dict,
+    method: str = "GET",
+    json_data: dict = None,
+    max_retries: int = 3,
+    request_timeout: float | None = None,
+) -> requests.Response:
     """
     Make an API request with rate limiting handling and moderate backoff.
     
@@ -33,6 +68,7 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
         method: HTTP method (GET or POST)
         json_data: JSON data for POST requests
         max_retries: Maximum number of retries (default: 3)
+        request_timeout: Optional timeout applied to the request in seconds
     
     Returns:
         requests.Response: The response object
@@ -40,11 +76,26 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
     Raises:
         Exception: If the request fails with a non-429 error
     """
+    effective_timeout = (
+        DEFAULT_API_REQUEST_TIMEOUT_SECONDS if request_timeout is None else request_timeout
+    )
+
     for attempt in range(max_retries + 1):  # +1 for initial attempt
+        request_kwargs = {"headers": headers}
         if method.upper() == "POST":
-            response = requests.post(url, headers=headers, json=json_data)
-        else:
-            response = requests.get(url, headers=headers)
+            request_kwargs["json"] = json_data
+        if effective_timeout is not None:
+            request_kwargs["timeout"] = effective_timeout
+
+        try:
+            if method.upper() == "POST":
+                response = requests.post(url, **request_kwargs)
+            else:
+                response = requests.get(url, **request_kwargs)
+        except requests_exceptions.Timeout as exc:
+            raise TimeoutError(f"Request to {url} timed out") from exc
+        except requests_exceptions.RequestException as exc:
+            raise Exception(f"Error during request to {url}: {exc}") from exc
         
         if response.status_code == 429 and attempt < max_retries:
             # Linear backoff: 60s, 90s, 120s, 150s...
@@ -73,7 +124,17 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
         headers["X-API-KEY"] = financial_api_key
 
     url = f"https://api.financialdatasets.ai/prices/?ticker={ticker}&interval=day&interval_multiplier=1&start_date={start_date}&end_date={end_date}"
-    response = _make_api_request(url, headers)
+    try:
+        response = _make_api_request(
+            url,
+            headers,
+            request_timeout=DEFAULT_API_REQUEST_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        print(
+            f"Skipping price fetch for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds."
+        )
+        return []
     if response.status_code != 200:
         raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
 
@@ -111,7 +172,17 @@ def get_financial_metrics(
         headers["X-API-KEY"] = financial_api_key
 
     url = f"https://api.financialdatasets.ai/financial-metrics/?ticker={ticker}&report_period_lte={end_date}&limit={limit}&period={period}"
-    response = _make_api_request(url, headers)
+    try:
+        response = _make_api_request(
+            url,
+            headers,
+            request_timeout=DEFAULT_API_REQUEST_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        print(
+            f"Skipping financial metrics for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds."
+        )
+        return []
     if response.status_code != 200:
         raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
 
@@ -151,7 +222,19 @@ def search_line_items(
         "period": period,
         "limit": limit,
     }
-    response = _make_api_request(url, headers, method="POST", json_data=body)
+    try:
+        response = _make_api_request(
+            url,
+            headers,
+            method="POST",
+            json_data=body,
+            request_timeout=DEFAULT_API_REQUEST_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        print(
+            f"Skipping line item search for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds."
+        )
+        return []
     if response.status_code != 200:
         raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
     data = response.json()
@@ -194,7 +277,17 @@ def get_insider_trades(
             url += f"&filing_date_gte={start_date}"
         url += f"&limit={limit}"
 
-        response = _make_api_request(url, headers)
+        try:
+            response = _make_api_request(
+                url,
+                headers,
+                request_timeout=DEFAULT_API_REQUEST_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            print(
+                f"Stopping insider trades fetch for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds."
+            )
+            break
         if response.status_code != 200:
             raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
 
@@ -250,13 +343,37 @@ def get_company_news(
     all_news = []
     current_end_date = end_date
 
+    fetch_timeout = COMPANY_NEWS_FETCH_TIMEOUT_SECONDS if COMPANY_NEWS_FETCH_TIMEOUT_SECONDS > 0 else None
+    fetch_deadline = (time.time() + fetch_timeout) if fetch_timeout else None
+    max_pages = COMPANY_NEWS_MAX_PAGES if COMPANY_NEWS_MAX_PAGES > 0 else None
+    page_count = 0
+
     while True:
+        if fetch_deadline and time.time() >= fetch_deadline:
+            print(
+                f"Stopping company news fetch for {ticker} after {fetch_timeout} seconds (partial results returned)."
+            )
+            break
+        if max_pages is not None and page_count >= max_pages:
+            print(f"Stopping company news fetch for {ticker} after reaching {max_pages} pages.")
+            break
+
         url = f"https://api.financialdatasets.ai/news/?ticker={ticker}&end_date={current_end_date}"
         if start_date:
             url += f"&start_date={start_date}"
         url += f"&limit={limit}"
 
-        response = _make_api_request(url, headers)
+        try:
+            response = _make_api_request(
+                url,
+                headers,
+                request_timeout=COMPANY_NEWS_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            print(
+                f"Skipping company news for {ticker} because the request timed out after {COMPANY_NEWS_TIMEOUT_SECONDS} seconds."
+            )
+            return []
         if response.status_code != 200:
             raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
 
@@ -268,6 +385,13 @@ def get_company_news(
             break
 
         all_news.extend(company_news)
+        page_count += 1
+
+        if fetch_deadline and time.time() >= fetch_deadline:
+            print(
+                f"Stopping company news fetch for {ticker} after {fetch_timeout} seconds (partial results returned)."
+            )
+            break
 
         # Only continue pagination if we have a start_date and got a full page
         if not start_date or len(company_news) < limit:
@@ -303,7 +427,17 @@ def get_market_cap(
             headers["X-API-KEY"] = financial_api_key
 
         url = f"https://api.financialdatasets.ai/company/facts/?ticker={ticker}"
-        response = _make_api_request(url, headers)
+        try:
+            response = _make_api_request(
+                url,
+                headers,
+                request_timeout=DEFAULT_API_REQUEST_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            print(
+                f"Skipping company facts for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds."
+            )
+            return None
         if response.status_code != 200:
             print(f"Error fetching company facts: {ticker} - {response.status_code}")
             return None

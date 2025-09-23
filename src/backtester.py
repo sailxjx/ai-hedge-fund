@@ -1,13 +1,38 @@
+import io
 import sys
+from contextlib import redirect_stdout
+from pathlib import Path
 
 from colorama import Fore, Style
 
-from src.main import run_hedge_fund
+from src.main import run_hedge_fund, strip_ansi
 from src.backtesting.engine import BacktestEngine
 from src.backtesting.types import PerformanceMetrics
 from src.cli.input import (
     parse_cli_inputs,
 )
+
+
+class _StdoutTee(io.TextIOBase):
+    """Mirror stdout writes while retaining a buffer for log capture."""
+
+    def __init__(self, *streams: io.TextIOBase) -> None:
+        self._streams = streams
+        self._buffer = io.StringIO()
+
+    def write(self, s: str) -> int:  # type: ignore[override]
+        for stream in self._streams:
+            stream.write(s)
+        self._buffer.write(s)
+        return len(s)
+
+    def flush(self) -> None:  # type: ignore[override]
+        for stream in self._streams:
+            stream.flush()
+        self._buffer.flush()
+
+    def getvalue(self) -> str:
+        return self._buffer.getvalue()
 
 
 def run_backtest(backtester: BacktestEngine) -> PerformanceMetrics | None:
@@ -62,5 +87,20 @@ if __name__ == "__main__":
         initial_margin_requirement=inputs.margin_requirement,
     )
 
-    # Run the backtest with graceful exit handling
-    performance_metrics = run_backtest(backtester)
+    performance_metrics: PerformanceMetrics | None = None
+    if inputs.log_file:
+        original_stdout = sys.stdout
+        tee = _StdoutTee(original_stdout)
+        try:
+            with redirect_stdout(tee):
+                performance_metrics = run_backtest(backtester)
+        finally:
+            log_path = Path(inputs.log_file).expanduser()
+            try:
+                if log_path.parent and not log_path.parent.exists():
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(strip_ansi(tee.getvalue()))
+            except OSError as error:
+                print(f"Failed to write log file '{log_path}': {error}", file=sys.stderr)
+    else:
+        performance_metrics = run_backtest(backtester)

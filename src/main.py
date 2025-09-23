@@ -1,10 +1,13 @@
 import sys
+import io
+import re
+from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
 from colorama import Fore, Style, init
-import questionary
+from contextlib import redirect_stdout
 from src.agents.portfolio_manager import portfolio_management_agent
 from src.agents.risk_manager import risk_management_agent
 from src.graph.state import AgentState
@@ -40,6 +43,14 @@ def parse_hedge_fund_response(response):
     except Exception as e:
         print(f"Unexpected error while parsing response: {e}\nResponse: {repr(response)}")
         return None
+
+
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI color codes from a string."""
+    return ANSI_ESCAPE_RE.sub("", text)
 
 
 ##### Run the Hedge Fund #####
@@ -176,4 +187,18 @@ if __name__ == "__main__":
         model_name=inputs.model_name,
         model_provider=inputs.model_provider,
     )
-    print_trading_output(result)
+    if inputs.log_file:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            print_trading_output(result)
+        rendered = buffer.getvalue()
+        log_path = Path(inputs.log_file).expanduser()
+        try:
+            if log_path.parent and not log_path.parent.exists():
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(strip_ansi(rendered))
+        except OSError as error:
+            print(f"Failed to write log file '{log_path}': {error}", file=sys.stderr)
+        print(rendered, end="")
+    else:
+        print_trading_output(result)
