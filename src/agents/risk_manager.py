@@ -1,3 +1,5 @@
+from typing import Any
+
 from langchain_core.messages import HumanMessage
 from src.graph.state import AgentState, show_agent_reasoning
 from src.utils.progress import progress
@@ -14,6 +16,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
     data = state["data"]
     tickers = data["tickers"]
     api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+    analyst_signals = data.get("analyst_signals", {})
     
     # Initialize risk analysis for each ticker
     risk_analysis = {}
@@ -162,15 +165,68 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
         
         # Combine volatility and correlation adjustments
         combined_limit_pct = vol_adjusted_limit_pct * corr_multiplier
-        # Convert to dollar position limit
         position_limit = total_portfolio_value * combined_limit_pct
+
+        constraint_notes: list[str] = []
+        overrides: dict[str, Any] = {}
+
+        momentum_payload = (analyst_signals.get("momentum_guardian_agent") or {}).get(ticker, {})
+        momentum_constraints = momentum_payload.get("constraints") or {}
+        stop_payload = (analyst_signals.get("stop_loss_guardian_agent") or {}).get(ticker, {})
+        stop_constraints = stop_payload.get("constraints") or {}
+
+        max_short_pct_override = momentum_constraints.get("max_short_exposure_pct")
+        if isinstance(max_short_pct_override, (int, float)) and max_short_pct_override >= 0:
+            capped_limit = total_portfolio_value * float(max_short_pct_override)
+            if capped_limit < position_limit:
+                position_limit = capped_limit
+                constraint_notes.append(
+                    f"Momentum cap {float(max_short_pct_override):.1%}"
+                )
+
+        allow_short_override = momentum_constraints.get("allow_short")
+        if allow_short_override is False:
+            overrides["block_new_shorts"] = True
+            position_limit = min(position_limit, current_position_value)
+            constraint_notes.append("Momentum blocks new shorts")
+
+        if stop_constraints.get("block_new_shorts"):
+            overrides["block_new_shorts"] = True
+
+        if stop_constraints.get("force_cover"):
+            target_qty = stop_constraints.get("force_cover_qty")
+            if isinstance(target_qty, (int, float)):
+                forced_qty = int(max(0, target_qty))
+            else:
+                forced_qty = position.get("short", 0)
+            forced_qty = min(int(position.get("short", 0)), forced_qty)
+            if forced_qty > 0:
+                overrides["force_cover_qty"] = forced_qty
+                overrides["force_cover_reason"] = stop_payload.get("reasoning")
+                overrides["target_short_shares"] = max(
+                    0,
+                    int(stop_constraints.get("target_short_shares", position.get("short", 0)))
+                )
+            constraint_notes.append("Stop-loss triggered")
+
+        elif "target_short_shares" in stop_constraints:
+            target_shares = stop_constraints.get("target_short_shares")
+            if isinstance(target_shares, (int, float)):
+                overrides["target_short_shares"] = max(0, int(target_shares))
+
+        position_limit = max(0.0, position_limit)
+        effective_limit_pct = (
+            position_limit / total_portfolio_value
+            if total_portfolio_value > 0
+            else 0.0
+        )
         
         # Calculate remaining limit for this position
-        remaining_position_limit = position_limit - current_position_value
-        
+        remaining_position_limit = max(0.0, position_limit - current_position_value)
+
         # Ensure we don't exceed available cash
         max_position_size = min(remaining_position_limit, portfolio.get("cash", 0))
-        
+
         risk_analysis[ticker] = {
             "remaining_position_limit": float(max_position_size),
             "current_price": float(current_price),
@@ -186,18 +242,27 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 "current_position_value": float(current_position_value),
                 "base_position_limit_pct": float(vol_adjusted_limit_pct),
                 "correlation_multiplier": float(corr_multiplier),
-                "combined_position_limit_pct": float(combined_limit_pct),
+                "combined_position_limit_pct": float(effective_limit_pct),
                 "position_limit": float(position_limit),
                 "remaining_limit": float(remaining_position_limit),
                 "available_cash": float(portfolio.get("cash", 0)),
-                "risk_adjustment": f"Volatility x Correlation adjusted: {combined_limit_pct:.1%} (base {vol_adjusted_limit_pct:.1%})"
+                "risk_adjustment": (
+                    f"Volatility x Correlation adjusted: {effective_limit_pct:.1%} "
+                    f"(base {vol_adjusted_limit_pct:.1%})"
+                ),
             },
         }
-        
+
+        if constraint_notes:
+            risk_analysis[ticker]["reasoning"]["constraints"] = constraint_notes
+
+        if overrides:
+            risk_analysis[ticker]["overrides"] = overrides
+
         progress.update_status(
             agent_id, 
             ticker, 
-            f"Adj. limit: {combined_limit_pct:.1%}, Available: ${max_position_size:.0f}"
+            f"Adj. limit: {effective_limit_pct:.1%}, Available: ${max_position_size:.0f}"
         )
 
     progress.update_status(agent_id, None, "Done")

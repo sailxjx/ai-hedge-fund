@@ -17,6 +17,8 @@ from src.agents.valuation import valuation_analyst_agent
 from src.agents.warren_buffett import warren_buffett_agent
 from src.agents.rakesh_jhunjhunwala import rakesh_jhunjhunwala_agent
 from src.agents.mohnish_pabrai import mohnish_pabrai_agent
+from src.agents.momentum_guardian import momentum_guardian_agent
+from src.agents.stop_loss_guardian import stop_loss_guardian_agent
 
 # Define analyst configuration - single source of truth
 ANALYST_CONFIG = {
@@ -147,6 +149,22 @@ ANALYST_CONFIG = {
         "agent_func": valuation_analyst_agent,
         "type": "analyst",
         "order": 14,
+    },
+    "momentum_guardian": {
+        "display_name": "Momentum Guardian",
+        "description": "Regime-aware trend gatekeeper",
+        "investing_style": "Screens technical momentum to prevent fighting strong bullish trends when sizing short exposure.",
+        "agent_func": momentum_guardian_agent,
+        "type": "analyst",
+        "order": 15,
+    },
+    "stop_loss_guardian": {
+        "display_name": "Stop-Loss Guardian",
+        "description": "Loss containment sentry",
+        "investing_style": "Monitors live positions and enforces deterministic stop-loss trims once adverse moves breach volatility bands.",
+        "agent_func": stop_loss_guardian_agent,
+        "type": "analyst",
+        "order": 16,
     },
 }
 

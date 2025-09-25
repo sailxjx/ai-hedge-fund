@@ -1,10 +1,10 @@
 import json
-import time
 from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.graph.state import AgentState, show_agent_reasoning
 from pydantic import BaseModel, Field
+from typing import Any
 from typing_extensions import Literal
 from src.utils.progress import progress
 from src.utils.llm import call_llm
@@ -33,6 +33,7 @@ def portfolio_management_agent(state: AgentState, agent_id: str = "portfolio_man
     current_prices = {}
     max_shares = {}
     signals_by_ticker = {}
+    overrides_by_ticker = {}
     for ticker in tickers:
         progress.update_status(agent_id, ticker, "Processing analyst signals")
 
@@ -46,6 +47,7 @@ def portfolio_management_agent(state: AgentState, agent_id: str = "portfolio_man
         risk_data = analyst_signals.get(risk_manager_id, {}).get(ticker, {})
         position_limits[ticker] = risk_data.get("remaining_position_limit", 0.0)
         current_prices[ticker] = float(risk_data.get("current_price", 0.0))
+        overrides_by_ticker[ticker] = risk_data.get("overrides", {}) or {}
 
         # Calculate maximum shares allowed based on position limit and price
         if current_prices[ticker] > 0:
@@ -73,6 +75,7 @@ def portfolio_management_agent(state: AgentState, agent_id: str = "portfolio_man
         current_prices=current_prices,
         max_shares=max_shares,
         portfolio=portfolio,
+        overrides=overrides_by_ticker,
         agent_id=agent_id,
         state=state,
     )
@@ -94,12 +97,13 @@ def portfolio_management_agent(state: AgentState, agent_id: str = "portfolio_man
 
 
 def compute_allowed_actions(
-        tickers: list[str],
-        current_prices: dict[str, float],
-        max_shares: dict[str, int],
-        portfolio: dict[str, float],
+    tickers: list[str],
+    current_prices: dict[str, float],
+    max_shares: dict[str, int],
+    portfolio: dict[str, float],
+    overrides: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, int]]:
-    """Compute allowed actions and max quantities for each ticker deterministically."""
+    """Compute allowed actions and max quantities per ticker deterministically, honoring overrides."""
     allowed = {}
     cash = float(portfolio.get("cash", 0.0))
     positions = portfolio.get("positions", {}) or {}
@@ -116,6 +120,7 @@ def compute_allowed_actions(
         long_shares = int(pos.get("long", 0) or 0)
         short_shares = int(pos.get("short", 0) or 0)
         max_qty = int(max_shares.get(ticker, 0) or 0)
+        override = overrides.get(ticker, {}) or {}
 
         # Start with zeros
         actions = {"buy": 0, "sell": 0, "short": 0, "cover": 0, "hold": 0}
@@ -145,6 +150,33 @@ def compute_allowed_actions(
 
         # Hold always valid
         actions["hold"] = 0
+
+        # Apply overrides from risk controls
+        if override.get("block_new_shorts"):
+            actions.pop("short", None)
+        max_short_add = override.get("max_additional_short_shares")
+        if "short" in actions and isinstance(max_short_add, (int, float)):
+            capped_short = min(actions["short"], int(max_short_add))
+            if capped_short > 0:
+                actions["short"] = capped_short
+            else:
+                actions.pop("short", None)
+
+        target_short = override.get("target_short_shares")
+        if target_short is not None and short_shares > 0:
+            try:
+                target_short_int = max(0, int(target_short))
+            except (TypeError, ValueError):
+                target_short_int = short_shares
+            desired_cover = max(0, short_shares - target_short_int)
+            if desired_cover > 0:
+                actions["cover"] = max(actions.get("cover", 0), desired_cover)
+
+        force_cover_qty = override.get("force_cover_qty")
+        if short_shares > 0 and isinstance(force_cover_qty, (int, float)):
+            forced = max(0, int(force_cover_qty))
+            if forced > 0:
+                actions["cover"] = max(actions.get("cover", 0), min(short_shares, forced))
 
         # Prune zero-capacity actions to reduce tokens, keep hold
         pruned = {"hold": 0}
@@ -180,19 +212,37 @@ def generate_trading_decision(
         current_prices: dict[str, float],
         max_shares: dict[str, int],
         portfolio: dict[str, float],
+        overrides: dict[str, dict[str, Any]],
         agent_id: str,
         state: AgentState,
 ) -> PortfolioManagerOutput:
     """Get decisions from the LLM with deterministic constraints and a minimal prompt."""
 
     # Deterministic constraints
-    allowed_actions_full = compute_allowed_actions(tickers, current_prices, max_shares, portfolio)
+    allowed_actions_full = compute_allowed_actions(
+        tickers, current_prices, max_shares, portfolio, overrides
+    )
 
     # Pre-fill pure holds to avoid sending them to the LLM at all
     prefilled_decisions: dict[str, PortfolioDecision] = {}
     tickers_for_llm: list[str] = []
+    positions = portfolio.get("positions") or {}
     for t in tickers:
         aa = allowed_actions_full.get(t, {"hold": 0})
+        override = overrides.get(t, {}) or {}
+        pos = positions.get(t, {"short": 0})
+        short_shares = int(pos.get("short", 0) or 0)
+
+        force_cover_qty = override.get("force_cover_qty")
+        if short_shares > 0 and isinstance(force_cover_qty, (int, float)):
+            qty = min(short_shares, max(0, int(force_cover_qty)))
+            if qty > 0:
+                reason = override.get("force_cover_reason") or "Stop-loss override"
+                prefilled_decisions[t] = PortfolioDecision(
+                    action="cover", quantity=qty, confidence=100.0, reasoning=reason[:100]
+                )
+                continue
+
         # If only 'hold' key exists, there is no trade possible
         if set(aa.keys()) == {"hold"}:
             prefilled_decisions[t] = PortfolioDecision(
