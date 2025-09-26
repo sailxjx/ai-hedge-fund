@@ -19,6 +19,9 @@ from src.agents.rakesh_jhunjhunwala import rakesh_jhunjhunwala_agent
 from src.agents.mohnish_pabrai import mohnish_pabrai_agent
 from src.agents.momentum_guardian import momentum_guardian_agent
 from src.agents.stop_loss_guardian import stop_loss_guardian_agent
+from src.agents.trend_regime import trend_regime_agent
+from src.agents.growth_momentum import growth_momentum_agent
+from src.agents.stat_mean_reversion import stat_mean_reversion_agent
 
 # Define analyst configuration - single source of truth
 ANALYST_CONFIG = {
@@ -126,13 +129,29 @@ ANALYST_CONFIG = {
         "type": "analyst",
         "order": 11,
     },
+    "growth_momentum": {
+        "display_name": "Growth Momentum Analyst",
+        "description": "Medium-term trend surfer",
+        "investing_style": "Quantifies rolling momentum and volatility compression to lean long in durable uptrends.",
+        "agent_func": growth_momentum_agent,
+        "type": "analyst",
+        "order": 12,
+    },
+    "stat_mean_reversion": {
+        "display_name": "Statistical Mean Reversion",
+        "description": "Z-score based rebound detector",
+        "investing_style": "Looks for extreme deviations from rolling means and quantifies reversion odds via normal tail probabilities.",
+        "agent_func": stat_mean_reversion_agent,
+        "type": "analyst",
+        "order": 13,
+    },
     "fundamentals_analyst": {
         "display_name": "Fundamentals Analyst",
         "description": "Financial Statement Specialist",
         "investing_style": "Delves into financial statements and economic indicators to assess the intrinsic value of companies through fundamental analysis.",
         "agent_func": fundamentals_analyst_agent,
         "type": "analyst",
-        "order": 12,
+        "order": 14,
     },
     "sentiment_analyst": {
         "display_name": "Sentiment Analyst",
@@ -140,7 +159,7 @@ ANALYST_CONFIG = {
         "investing_style": "Gauges market sentiment and investor behavior to predict market movements and identify opportunities through behavioral analysis.",
         "agent_func": sentiment_analyst_agent,
         "type": "analyst",
-        "order": 13,
+        "order": 15,
     },
     "valuation_analyst": {
         "display_name": "Valuation Analyst",
@@ -148,7 +167,7 @@ ANALYST_CONFIG = {
         "investing_style": "Specializes in determining the fair value of companies, using various valuation models and financial metrics for investment decisions.",
         "agent_func": valuation_analyst_agent,
         "type": "analyst",
-        "order": 14,
+        "order": 16,
     },
     "momentum_guardian": {
         "display_name": "Momentum Guardian",
@@ -156,7 +175,15 @@ ANALYST_CONFIG = {
         "investing_style": "Screens technical momentum to prevent fighting strong bullish trends when sizing short exposure.",
         "agent_func": momentum_guardian_agent,
         "type": "analyst",
-        "order": 15,
+        "order": 17,
+    },
+    "trend_regime": {
+        "display_name": "Trend Regime Analyst",
+        "description": "Deterministic price regime detector",
+        "investing_style": "Quantifies medium-term trend strength and breakouts to bias the book toward prevailing momentum.",
+        "agent_func": trend_regime_agent,
+        "type": "analyst",
+        "order": 18,
     },
     "stop_loss_guardian": {
         "display_name": "Stop-Loss Guardian",
@@ -164,7 +191,7 @@ ANALYST_CONFIG = {
         "investing_style": "Monitors live positions and enforces deterministic stop-loss trims once adverse moves breach volatility bands.",
         "agent_func": stop_loss_guardian_agent,
         "type": "analyst",
-        "order": 16,
+        "order": 18,
     },
 }
 

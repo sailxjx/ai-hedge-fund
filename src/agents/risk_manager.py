@@ -172,26 +172,130 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
 
         momentum_payload = (analyst_signals.get("momentum_guardian_agent") or {}).get(ticker, {})
         momentum_constraints = momentum_payload.get("constraints") or {}
+        trend_payload = (analyst_signals.get("trend_regime_agent") or {}).get(ticker, {})
+        trend_constraints = trend_payload.get("constraints") or {}
+        growth_payload = (analyst_signals.get("growth_momentum_agent") or {}).get(ticker, {})
+        growth_constraints = growth_payload.get("constraints") or {}
+        mean_rev_payload = (analyst_signals.get("stat_mean_reversion_agent") or {}).get(ticker, {})
+        mean_rev_constraints = mean_rev_payload.get("constraints") or {}
         stop_payload = (analyst_signals.get("stop_loss_guardian_agent") or {}).get(ticker, {})
         stop_constraints = stop_payload.get("constraints") or {}
 
-        max_short_pct_override = momentum_constraints.get("max_short_exposure_pct")
-        if isinstance(max_short_pct_override, (int, float)) and max_short_pct_override >= 0:
-            capped_limit = total_portfolio_value * float(max_short_pct_override)
+        constraint_sources = [
+            ("Momentum", momentum_constraints),
+            ("Trend", trend_constraints),
+            ("GrowthMomentum", growth_constraints),
+            ("MeanReversion", mean_rev_constraints),
+        ]
+
+        payload_lookup = {
+            "Momentum": momentum_payload,
+            "Trend": trend_payload,
+            "GrowthMomentum": growth_payload,
+            "MeanReversion": mean_rev_payload,
+        }
+
+        max_short_caps: list[tuple[float, str]] = []
+        for name, constraint in constraint_sources:
+            value = constraint.get("max_short_exposure_pct")
+            if isinstance(value, (int, float)) and value >= 0:
+                max_short_caps.append((float(value), name))
+
+        if max_short_caps:
+            cap_value, cap_source = min(max_short_caps, key=lambda x: x[0])
+            capped_limit = total_portfolio_value * cap_value
             if capped_limit < position_limit:
                 position_limit = capped_limit
-                constraint_notes.append(
-                    f"Momentum cap {float(max_short_pct_override):.1%}"
-                )
+                constraint_notes.append(f"{cap_source} cap {cap_value:.1%}")
 
-        allow_short_override = momentum_constraints.get("allow_short")
+        allow_short_override = None
+        for name, constraint in constraint_sources:
+            if constraint.get("allow_short") is False:
+                allow_short_override = False
+                constraint_notes.append(f"{name} blocks new shorts")
+                break
+
         if allow_short_override is False:
             overrides["block_new_shorts"] = True
-            position_limit = min(position_limit, current_position_value)
-            constraint_notes.append("Momentum blocks new shorts")
+            overrides["max_additional_short_shares"] = 0
+        else:
+            if any(constraint.get("block_new_shorts") for _, constraint in constraint_sources):
+                overrides["block_new_shorts"] = True
+                overrides.setdefault("max_additional_short_shares", 0)
 
-        if stop_constraints.get("block_new_shorts"):
+        target_short_candidates: list[tuple[int, str]] = []
+        for name, constraint in constraint_sources:
+            target = constraint.get("target_short_shares")
+            if isinstance(target, (int, float)):
+                target_short_candidates.append((max(0, int(target)), name))
+
+        if target_short_candidates:
+            target_short, target_source = min(target_short_candidates, key=lambda x: x[0])
+            overrides["target_short_shares"] = target_short
+            constraint_notes.append(f"{target_source} target {target_short} shorts")
+
+        preferred_direction = None
+        direction_votes = {"long": 0.0, "short": 0.0}
+        for name, constraint in constraint_sources:
+            preference = constraint.get("preferred_direction")
+            if preference and not preferred_direction:
+                preferred_direction = str(preference)
+                constraint_notes.append(f"{name} prefers {preferred_direction}")
+            if preference:
+                payload_conf = payload_lookup.get(name, {}).get("confidence")
+                weight = float(payload_conf) / 100.0 if payload_conf is not None else 0.5
+                if preference.lower() in direction_votes:
+                    direction_votes[preference.lower()] += weight
+
+        if preferred_direction:
+            overrides["preferred_direction"] = preferred_direction
+            if preferred_direction.lower() == "long" and position.get("short", 0) > 0:
+                overrides["force_cover_qty"] = int(position.get("short", 0))
+                overrides.setdefault("force_cover_reason", "Trend regime enforcing long bias")
+
+        growth_inds = (growth_payload.get("indicators") or {}) if growth_payload else {}
+        prob_up = growth_inds.get("prob_up")
+        base_rate = growth_inds.get("base_rate")
+        if (
+            prob_up is not None
+            and base_rate is not None
+            and prob_up >= min(0.99, base_rate * 1.25)
+            and position.get("short", 0) > 0
+        ):
+            overrides["force_cover_qty"] = int(position.get("short", 0))
+            overrides["force_cover_reason"] = (
+                f"Growth momentum classifier prob_up {prob_up:.2f} exceeds baseline {base_rate:.2f}"
+            )
+
+        # If long-directed analysts collectively outweigh shorts, enforce conservative short caps
+        if direction_votes["long"] - direction_votes["short"] >= 0.5:
             overrides["block_new_shorts"] = True
+            overrides["max_additional_short_shares"] = 0
+            if position.get("short", 0) > 0:
+                overrides.setdefault("force_cover_qty", int(position.get("short", 0)))
+                overrides.setdefault("force_cover_reason", "Long-bias consensus across analysts")
+ 
+        long_weight = 0.0
+        if prob_up is not None and base_rate is not None:
+            long_weight += max(0.0, prob_up - base_rate)
+        mean_rev_inds = (mean_rev_payload.get("indicators") or {}) if mean_rev_payload else {}
+        prob_revert_up = mean_rev_inds.get("prob_revert_up")
+        if prob_revert_up is not None:
+            long_weight += max(0.0, prob_revert_up - 0.5)
+
+        if long_weight > 0 and current_price > 0:
+            desired_long = min(
+                position_limit,
+                total_portfolio_value * min(0.3, long_weight)
+            )
+            target_long_shares = int(desired_long / current_price)
+            existing_long = int(position.get("long", 0))
+            if target_long_shares > existing_long:
+                overrides["target_long_shares"] = target_long_shares
+                overrides.setdefault("force_buy_reason", "Probabilistic long allocation")
+                constraint_notes.append(
+                    f"Allocating long exposure based on prob_up delta {long_weight:.2f}"
+                )
 
         if stop_constraints.get("force_cover"):
             target_qty = stop_constraints.get("force_cover_qty")

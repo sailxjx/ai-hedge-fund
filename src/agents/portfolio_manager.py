@@ -152,6 +152,12 @@ def compute_allowed_actions(
         actions["hold"] = 0
 
         # Apply overrides from risk controls
+        preferred_direction = (override.get("preferred_direction") or "").lower()
+        if preferred_direction == "long":
+            actions.pop("short", None)
+        elif preferred_direction == "short":
+            actions.pop("buy", None)
+
         if override.get("block_new_shorts"):
             actions.pop("short", None)
         max_short_add = override.get("max_additional_short_shares")
@@ -177,6 +183,16 @@ def compute_allowed_actions(
             forced = max(0, int(force_cover_qty))
             if forced > 0:
                 actions["cover"] = max(actions.get("cover", 0), min(short_shares, forced))
+
+        target_long = override.get("target_long_shares")
+        if target_long is not None:
+            try:
+                target_long_int = max(0, int(target_long))
+            except (TypeError, ValueError):
+                target_long_int = long_shares
+            desired_buy = max(0, target_long_int - long_shares)
+            if desired_buy > 0:
+                actions["buy"] = max(actions.get("buy", 0), desired_buy)
 
         # Prune zero-capacity actions to reduce tokens, keep hold
         pruned = {"hold": 0}
@@ -232,6 +248,7 @@ def generate_trading_decision(
         override = overrides.get(t, {}) or {}
         pos = positions.get(t, {"short": 0})
         short_shares = int(pos.get("short", 0) or 0)
+        long_shares = int(pos.get("long", 0) or 0)
 
         force_cover_qty = override.get("force_cover_qty")
         if short_shares > 0 and isinstance(force_cover_qty, (int, float)):
@@ -242,6 +259,22 @@ def generate_trading_decision(
                     action="cover", quantity=qty, confidence=100.0, reasoning=reason[:100]
                 )
                 continue
+
+        target_long = override.get("target_long_shares")
+        if target_long is not None:
+            try:
+                target_long_int = max(0, int(target_long))
+            except (TypeError, ValueError):
+                target_long_int = long_shares
+            desired_buy = max(0, target_long_int - long_shares)
+            if desired_buy > 0 and aa.get("buy"):
+                qty = min(desired_buy, aa["buy"])
+                if qty > 0:
+                    reason = override.get("force_buy_reason") or "Risk manager long target"
+                    prefilled_decisions[t] = PortfolioDecision(
+                        action="buy", quantity=qty, confidence=100.0, reasoning=reason[:100]
+                    )
+                    continue
 
         # If only 'hold' key exists, there is no trade possible
         if set(aa.keys()) == {"hold"}:
