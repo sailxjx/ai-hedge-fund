@@ -1,4 +1,5 @@
 from langchain_core.messages import HumanMessage
+from src.agents.persona_utils import persona_from_observations
 from src.graph.state import AgentState, show_agent_reasoning
 from src.utils.api_key import get_api_key_from_state
 from src.utils.progress import progress
@@ -6,6 +7,17 @@ import json
 
 from src.tools.api import get_financial_metrics
 
+PERSONA_NAME = "Aurora"
+PERSONA_ROLE = "a fundamentals persona translating metric mosaics into calls"
+PERSONA_BACKSTORY = (
+    "Aurora spent years running deep fundamental screens and now synthesises profitability, growth, health, and valuation signals before advising the PM."
+)
+PERSONA_INSTRUCTIONS = (
+    "Use the provided profitability, growth, balance sheet, and valuation observations to form the view—no preset thresholds are binding.",
+    "Highlight how conflicting sub-signals influence conviction, and leave constraints empty when evidence is mixed.",
+    "Speak in first person and cite the observations that tipped the decision.",
+)
+ALLOWED_SIGNALS = ["bullish", "bearish", "neutral"]
 
 ##### Fundamental Agent #####
 def fundamentals_analyst_agent(state: AgentState, agent_id: str = "fundamentals_analyst_agent"):
@@ -118,29 +130,70 @@ def fundamentals_analyst_agent(state: AgentState, agent_id: str = "fundamentals_
             "details": (f"P/E: {pe_ratio:.2f}" if pe_ratio else "P/E: N/A") + ", " + (f"P/B: {pb_ratio:.2f}" if pb_ratio else "P/B: N/A") + ", " + (f"P/S: {ps_ratio:.2f}" if ps_ratio else "P/S: N/A"),
         }
 
-        progress.update_status(agent_id, ticker, "Calculating final signal")
-        # Determine overall signal
-        bullish_signals = signals.count("bullish")
-        bearish_signals = signals.count("bearish")
-
-        if bullish_signals > bearish_signals:
-            overall_signal = "bullish"
-        elif bearish_signals > bullish_signals:
-            overall_signal = "bearish"
-        else:
-            overall_signal = "neutral"
-
-        # Calculate confidence level
-        total_signals = len(signals)
-        confidence = round(max(bullish_signals, bearish_signals) / total_signals, 2) * 100
-
-        fundamental_analysis[ticker] = {
-            "signal": overall_signal,
-            "confidence": confidence,
-            "reasoning": reasoning,
+        progress.update_status(agent_id, ticker, "Preparing persona observations")
+        component_summary = {
+            "profitability_signal": signals[0],
+            "growth_signal": signals[1],
+            "financial_health_signal": signals[2],
+            "valuation_signal": signals[3],
+        }
+        aggregate_counts = {
+            "bullish": signals.count("bullish"),
+            "bearish": signals.count("bearish"),
+            "neutral": signals.count("neutral"),
+        }
+        metric_snapshot = {
+            "return_on_equity": metrics.return_on_equity,
+            "net_margin": metrics.net_margin,
+            "revenue_growth": metrics.revenue_growth,
+            "earnings_growth": metrics.earnings_growth,
+            "current_ratio": metrics.current_ratio,
+            "debt_to_equity": metrics.debt_to_equity,
+            "free_cash_flow_per_share": metrics.free_cash_flow_per_share,
+            "price_to_earnings_ratio": metrics.price_to_earnings_ratio,
+            "price_to_book_ratio": metrics.price_to_book_ratio,
+            "price_to_sales_ratio": metrics.price_to_sales_ratio,
+        }
+        observations = {
+            "ticker": ticker,
+            "component_summary": component_summary,
+            "component_counts": aggregate_counts,
+            "reasoning_breakdown": reasoning,
+            "metrics": metric_snapshot,
         }
 
-        progress.update_status(agent_id, ticker, "Done", analysis=json.dumps(reasoning, indent=4))
+        decision = persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="neutral",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to neutral because persona output was unavailable.",
+        )
+
+        confidence = int(max(0, min(round(decision.confidence), 100)))
+        constraints = decision.constraints or {}
+
+        payload = {
+            "signal": decision.signal,
+            "confidence": confidence,
+            "reasoning": decision.reasoning,
+            "constraints": constraints,
+            "components": component_summary,
+            "metrics": metric_snapshot,
+            "meta": {
+                "observations": observations,
+            },
+        }
+
+        fundamental_analysis[ticker] = payload
+
+        progress.update_status(agent_id, ticker, "Done", analysis=json.dumps(payload, indent=4))
 
     # Create the fundamental analysis message
     message = HumanMessage(

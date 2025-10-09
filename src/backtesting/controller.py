@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Callable, Sequence, Dict, Any
+import copy
+from typing import Any, Callable, Dict, Sequence
 
-from .types import AgentOutput, AgentDecisions, PortfolioSnapshot, ActionLiteral, Action
 from .portfolio import Portfolio
+from .data_types import Action, ActionLiteral, AgentDecisions, AgentOutput, PortfolioSnapshot
 
 
 class AgentController:
@@ -20,6 +21,7 @@ class AgentController:
         model_name: str,
         model_provider: str,
         selected_analysts: Sequence[str] | None,
+        metadata_overrides: Dict[str, Any] | None = None,
     ) -> AgentOutput:
         # Ensure we pass a plain snapshot dict to preserve legacy expectations
         if isinstance(portfolio, Portfolio):
@@ -35,6 +37,7 @@ class AgentController:
             model_name=model_name,
             model_provider=model_provider,
             selected_analysts=list(selected_analysts) if selected_analysts is not None else None,
+            metadata_overrides=metadata_overrides,
         )
 
         # Normalize outputs to avoid None/missing keys
@@ -62,6 +65,6 @@ class AgentController:
             "decisions": normalized_decisions,
             "analyst_signals": analyst_signals_in,
         }
+        if isinstance(output, dict) and "risk_manager_state" in output:
+            normalized_output["risk_manager_state"] = copy.deepcopy(output["risk_manager_state"])
         return normalized_output
-
-

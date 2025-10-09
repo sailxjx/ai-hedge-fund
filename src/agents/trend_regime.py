@@ -8,16 +8,11 @@ import numpy as np
 import pandas as pd
 from langchain_core.messages import HumanMessage
 
+from src.agents.persona_utils import persona_from_observations
 from src.graph.state import AgentState, show_agent_reasoning
 from src.tools.api import get_prices, prices_to_df
 from src.utils.api_key import get_api_key_from_state
 from src.utils.progress import progress
-
-
-def _compute_confidence(trend_strength: float, momentum: float) -> int:
-    """Map trend strength and momentum into a 0-100 confidence score."""
-    score = 55 + trend_strength * 25 + momentum * 120
-    return int(np.clip(score, 35, 95))
 
 
 def _extended_start(start_date: str | None, buffer_days: int = 120) -> str | None:
@@ -29,6 +24,18 @@ def _extended_start(start_date: str | None, buffer_days: int = 120) -> str | Non
         return start_date
     return (start_dt - timedelta(days=buffer_days)).strftime("%Y-%m-%d")
 
+
+PERSONA_NAME = "Helios"
+PERSONA_ROLE = "a trend cartographer who narrates regime direction"
+PERSONA_BACKSTORY = (
+    "Helios traded systematic trend strategies and now weighs deterministic momentum features before advising the desk."
+)
+PERSONA_INSTRUCTIONS = (
+    "Inspect EMA stacks, slopes, and momentum metrics before locking in a stance.",
+    "Do not force bullish or bearish calls when evidence is mixed; explain why you stay neutral if so.",
+    "Speak in first person and cite the decisive indicators.",
+)
+ALLOWED_SIGNALS = ["bullish", "bearish", "neutral"]
 
 ##### Trend Regime Analyst #####
 def trend_regime_agent(state: AgentState, agent_id: str = "trend_regime_agent"):
@@ -93,12 +100,9 @@ def trend_regime_agent(state: AgentState, agent_id: str = "trend_regime_agent"):
         rolling_high_40 = closes.rolling(window=40).max().iloc[-1] if len(closes) >= 40 else closes.max()
         rolling_low_40 = closes.rolling(window=40).min().iloc[-1] if len(closes) >= 40 else closes.min()
 
-        signal = "neutral"
-        reasoning = "Trend signals mixed; staying neutral."
         trend_strength = float((slope_mid + slope_long) / 2)
         momentum_factor = float((mom_10 + mom_20) / 2)
 
-        # Determine bullish vs bearish regimes
         bullish_stack = (
             recent_close > recent_mid > recent_long
             and slope_mid >= -0.005
@@ -111,22 +115,6 @@ def trend_regime_agent(state: AgentState, agent_id: str = "trend_regime_agent"):
             and slope_long <= 0.002
             and momentum_factor <= 0.05
         )
-
-        if bullish_stack:
-            signal = "bullish"
-            reasoning = (
-                "Uptrend confirmed: price stacked above EMA21/55 with positive slopes and momentum."
-            )
-        elif bearish_stack:
-            signal = "bearish"
-            reasoning = (
-                "Downtrend confirmed: price below EMAs with negative slopes; shorts favoured."
-            )
-
-        confidence = _compute_confidence(trend_strength, momentum_factor)
-
-        if signal == "neutral":
-            confidence = min(confidence, 55)
 
         indicators = {
             "price": float(recent_close),
@@ -141,34 +129,44 @@ def trend_regime_agent(state: AgentState, agent_id: str = "trend_regime_agent"):
             "range_low_40": float(rolling_low_40),
         }
 
-        constraints: dict[str, Any] = {}
-        uptrend_slopes = slope_mid > 0 and slope_long > 0
+        observations = {
+            "ticker": ticker,
+            "indicators": indicators,
+            "trend_strength": trend_strength,
+            "momentum_factor": momentum_factor,
+            "bullish_stack": bool(bullish_stack),
+            "bearish_stack": bool(bearish_stack),
+            "rolling_high_40": float(rolling_high_40),
+            "rolling_low_40": float(rolling_low_40),
+        }
 
-        if signal == "bullish":
-            if confidence >= 60:
-                constraints["allow_short"] = False
-                constraints["target_short_shares"] = 0
-                constraints["preferred_direction"] = "long"
-            else:
-                constraints["max_short_exposure_pct"] = 0.05
-        elif signal == "bearish" and confidence >= 65:
-            constraints["max_short_exposure_pct"] = 0.25
-        elif uptrend_slopes:
-            constraints["max_short_exposure_pct"] = 0.02
+        decision = persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="neutral",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to neutral when persona output was unavailable.",
+        )
 
         payload = {
-            "signal": signal,
-            "confidence": confidence,
-            "reasoning": reasoning,
+            "signal": decision.signal,
+            "confidence": int(max(0, min(round(decision.confidence), 100))),
+            "reasoning": decision.reasoning,
+            "constraints": decision.constraints or {},
             "indicators": indicators,
+            "meta": {"observations": observations},
         }
-        if constraints:
-            payload["constraints"] = constraints
 
         progress.update_status(
             agent_id,
             ticker,
-            f"Signal {signal} @ {confidence}/100 | mom10 {mom_10:.2%}"
+            f"Signal {payload['signal']} @ {payload['confidence']}/100 | mom10 {mom_10:.2%}",
         )
 
         signals[ticker] = payload

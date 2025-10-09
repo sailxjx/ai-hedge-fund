@@ -9,6 +9,7 @@ configurable weights.
 import json
 import statistics
 from langchain_core.messages import HumanMessage
+from src.agents.persona_utils import persona_from_observations
 from src.graph.state import AgentState, show_agent_reasoning
 from src.utils.progress import progress
 from src.utils.api_key import get_api_key_from_state
@@ -17,6 +18,18 @@ from src.tools.api import (
     get_market_cap,
     search_line_items,
 )
+
+PERSONA_NAME = "Ledger"
+PERSONA_ROLE = "a valuation persona reconciling multiple models"
+PERSONA_BACKSTORY = (
+    "Ledger ran valuation committees across buy-side desks and now interprets DCF, owner earnings, EV/EBITDA, and residual income outputs before making a call."
+)
+PERSONA_INSTRUCTIONS = (
+    "Discuss how each valuation method compares to market cap.",
+    "Highlight scenario ranges when DCF dominates the view.",
+    "Explain disagreements between methods in first person before deciding.",
+)
+ALLOWED_SIGNALS = ["bullish", "bearish", "neutral"]
 
 def valuation_analyst_agent(state: AgentState, agent_id: str = "valuation_analyst_agent"):
     """Run valuation across tickers and write signals back to `state`."""
@@ -160,52 +173,60 @@ def valuation_analyst_agent(state: AgentState, agent_id: str = "valuation_analys
             v["weight"] * v["gap"] for v in method_values.values() if v["gap"] is not None
         ) / total_weight
 
-        signal = "bullish" if weighted_gap > 0.15 else "bearish" if weighted_gap < -0.15 else "neutral"
-        confidence = round(min(abs(weighted_gap) / 0.30 * 100, 100))
-
-        # Enhanced reasoning with DCF scenario details
-        reasoning = {}
-        for m, vals in method_values.items():
+        valuation_reasoning = {}
+        for method_key, vals in method_values.items():
             if vals["value"] > 0:
-                base_details = (
-                    f"Value: ${vals['value']:,.2f}, Market Cap: ${market_cap:,.2f}, "
-                    f"Gap: {vals['gap']:.1%}, Weight: {vals['weight']*100:.0f}%"
-                )
-                
-                # Add enhanced DCF details
-                if m == "dcf" and 'dcf_results' in locals():
-                    enhanced_details = (
-                        f"{base_details}\n"
-                        f"  WACC: {wacc:.1%}, Bear: ${dcf_results['downside']:,.2f}, "
-                        f"Bull: ${dcf_results['upside']:,.2f}, Range: ${dcf_results['range']:,.2f}"
-                    )
-                else:
-                    enhanced_details = base_details
-                
-                reasoning[f"{m}_analysis"] = {
-                    "signal": (
-                        "bullish" if vals["gap"] and vals["gap"] > 0.15 else
-                        "bearish" if vals["gap"] and vals["gap"] < -0.15 else "neutral"
-                    ),
-                    "details": enhanced_details,
+                details = {
+                    "estimate": vals["value"],
+                    "market_cap": market_cap,
+                    "gap": vals["gap"],
+                    "weight": vals["weight"],
                 }
-        
-        # Add overall DCF scenario summary if available
-        if 'dcf_results' in locals():
-            reasoning["dcf_scenario_analysis"] = {
-                "bear_case": f"${dcf_results['downside']:,.2f}",
-                "base_case": f"${dcf_results['scenarios']['base']:,.2f}",  
-                "bull_case": f"${dcf_results['upside']:,.2f}",
-                "wacc_used": f"{wacc:.1%}",
-                "fcf_periods_analyzed": len(fcf_history)
+                valuation_reasoning[f"{method_key}_analysis"] = details
+
+        if dcf_results:
+            valuation_reasoning["dcf_scenarios"] = {
+                "downside": dcf_results["downside"],
+                "base": dcf_results["scenarios"]["base"],
+                "upside": dcf_results["upside"],
+                "range": dcf_results["range"],
+                "wacc": wacc,
+                "fcf_samples": len(fcf_history),
             }
 
-        valuation_analysis[ticker] = {
-            "signal": signal,
-            "confidence": confidence,
-            "reasoning": reasoning,
+        observations = {
+            "ticker": ticker,
+            "market_cap": market_cap,
+            "weighted_gap": weighted_gap,
+            "method_values": method_values,
+            "valuation_reasoning": valuation_reasoning,
         }
-        progress.update_status(agent_id, ticker, "Done", analysis=json.dumps(reasoning, indent=4))
+
+        decision = persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="neutral",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to neutral after missing persona decision.",
+        )
+
+        valuation_payload = {
+            "signal": decision.signal,
+            "confidence": int(max(0, min(round(decision.confidence), 100))),
+            "reasoning": decision.reasoning,
+            "constraints": decision.constraints or {},
+            "valuation_summary": observations,
+            "meta": {"observations": observations},
+        }
+        valuation_analysis[ticker] = valuation_payload
+        progress.update_status(agent_id, ticker, "Done", analysis=json.dumps(valuation_payload, indent=4))
+
 
     # ---- Emit message (for LLM tool chain) ----
     msg = HumanMessage(content=json.dumps(valuation_analysis), name=agent_id)

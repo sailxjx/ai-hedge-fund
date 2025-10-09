@@ -56,6 +56,12 @@ class BacktestService:
         self.model_provider = model_provider
         self.request = request
         self.portfolio_values = []
+        self.initial_long_pct = float(getattr(request, "initial_long_pct", 0.0) or 0.0)
+        if self.initial_long_pct < 0.0:
+            self.initial_long_pct = 0.0
+        if self.initial_long_pct > 100.0:
+            self.initial_long_pct = 100.0
+        self._initial_long_applied = False
 
     def execute_trade(self, ticker: str, action: str, quantity: float, current_price: float) -> int:
         """
@@ -232,6 +238,87 @@ class BacktestService:
             get_insider_trades(ticker, self.end_date, start_date=self.start_date, limit=1000, api_key=api_key)
             get_company_news(ticker, self.end_date, start_date=self.start_date, limit=1000, api_key=api_key)
 
+    def _apply_initial_positions(self, first_trading_day: pd.Timestamp | None) -> None:
+        if self._initial_long_applied:
+            return
+        if self.initial_long_pct <= 0.0:
+            self._initial_long_applied = True
+            return
+        if not self.tickers or first_trading_day is None:
+            self._initial_long_applied = True
+            return
+        if getattr(self.request, "portfolio_positions", None):
+            self._initial_long_applied = True
+            return
+
+        available_cash = self.portfolio.get("cash", 0.0)
+        if available_cash <= 0.0:
+            self._initial_long_applied = True
+            return
+
+        target_cash = available_cash * (self.initial_long_pct / 100.0)
+        if target_cash <= 0.0:
+            self._initial_long_applied = True
+            return
+
+        remaining_cash = target_cash
+        first_day_str = first_trading_day.strftime("%Y-%m-%d")
+        total_tickers = len(self.tickers)
+        api_key = None
+        if getattr(self.request, "api_keys", None):
+            api_key = self.request.api_keys.get("FINANCIAL_DATASETS_API_KEY")
+
+        for index, ticker in enumerate(self.tickers):
+            if remaining_cash <= 0.0:
+                break
+
+            tickers_left = total_tickers - index
+            if tickers_left <= 0:
+                break
+
+            desired_cash = remaining_cash / tickers_left
+
+            price_df = get_price_data(ticker, self.start_date, first_day_str, api_key=api_key)
+            if price_df.empty:
+                continue
+
+            try:
+                price_slice = price_df.loc[:first_day_str]
+                if price_slice.empty:
+                    continue
+                price = float(price_slice.iloc[-1]["close"])
+            except (KeyError, IndexError):
+                continue
+
+            if price <= 0.0:
+                continue
+
+            desired_shares = int(desired_cash // price)
+            if desired_shares <= 0:
+                continue
+
+            position = self.portfolio["positions"].setdefault(
+                ticker,
+                {
+                    "long": 0,
+                    "short": 0,
+                    "long_cost_basis": 0.0,
+                    "short_cost_basis": 0.0,
+                    "short_margin_used": 0.0,
+                },
+            )
+
+            old_shares = position["long"]
+            total_shares = old_shares + desired_shares
+            total_cost = (position["long_cost_basis"] * old_shares) + (price * desired_shares)
+            position["long"] = total_shares
+            position["long_cost_basis"] = total_cost / total_shares if total_shares > 0 else 0.0
+
+            self.portfolio["cash"] -= price * desired_shares
+            remaining_cash -= price * desired_shares
+
+        self._initial_long_applied = True
+
     def _update_performance_metrics(self, performance_metrics: Dict[str, Any]):
         """Update performance metrics using daily returns."""
         values_df = pd.DataFrame(self.portfolio_values).set_index("Date")
@@ -302,6 +389,9 @@ class BacktestService:
             self.portfolio_values = [{"Date": dates[0], "Portfolio Value": self.initial_capital}]
         else:
             self.portfolio_values = []
+
+        if len(dates) > 0:
+            self._apply_initial_positions(dates[0])
 
         backtest_results = []
 

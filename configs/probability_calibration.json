@@ -1,0 +1,75 @@
+{
+  "metadata": {
+    "generated_at": "2025-09-27T07:58:00+00:00",
+    "data_root": "log/ml_diagnostics",
+    "method": "platt_scaling"
+  },
+  "growth_momentum": {
+    "MSFT": {
+      "a": 1.189404,
+      "b": -0.034534,
+      "sample_count": 896,
+      "positive_rate": 0.560268,
+      "brier_score": 0.245768,
+      "log_loss": 0.684647
+    },
+    "NVDA": {
+      "a": 1.926105,
+      "b": -0.153829,
+      "sample_count": 896,
+      "positive_rate": 0.545759,
+      "brier_score": 0.24688,
+      "log_loss": 0.686861
+    },
+    "TSLA": {
+      "a": 1.235804,
+      "b": -0.04215,
+      "sample_count": 896,
+      "positive_rate": 0.555804,
+      "brier_score": 0.2459,
+      "log_loss": 0.684914
+    },
+    "default": {
+      "a": 1.33911,
+      "b": -0.061575,
+      "sample_count": 2688,
+      "positive_rate": 0.553943,
+      "brier_score": 0.246221,
+      "log_loss": 0.685557
+    }
+  },
+  "stat_mean_reversion": {
+    "MSFT": {
+      "a": -0.13096,
+      "b": 0.326522,
+      "sample_count": 607,
+      "positive_rate": 0.5486,
+      "brier_score": 0.246657,
+      "log_loss": 0.686385
+    },
+    "NVDA": {
+      "a": -0.214439,
+      "b": 0.400587,
+      "sample_count": 607,
+      "positive_rate": 0.545305,
+      "brier_score": 0.245166,
+      "log_loss": 0.683287
+    },
+    "TSLA": {
+      "a": 0.059125,
+      "b": 0.219618,
+      "sample_count": 607,
+      "positive_rate": 0.568369,
+      "brier_score": 0.245025,
+      "log_loss": 0.683162
+    },
+    "default": {
+      "a": -0.077777,
+      "b": 0.294015,
+      "sample_count": 1821,
+      "positive_rate": 0.554091,
+      "brier_score": 0.24666,
+      "log_loss": 0.686436
+    }
+  }
+}

@@ -6,6 +6,7 @@ import pandas as pd
 from langchain_core.messages import HumanMessage
 
 from src.graph.state import AgentState, show_agent_reasoning
+from src.agents.persona_utils import persona_from_observations
 from src.tools.api import get_prices, prices_to_df
 from src.utils.api_key import get_api_key_from_state
 from src.utils.progress import progress
@@ -31,6 +32,19 @@ def _calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi.fillna(50.0)
+
+
+PERSONA_NAME = "Orion"
+PERSONA_ROLE = "a momentum guardian who protects the book from fighting dominant trends"
+PERSONA_BACKSTORY = (
+    "Orion spent a decade trading trend-following strategies and now advises when our short book must respect momentum."
+)
+PERSONA_INSTRUCTIONS = (
+    "Use the EMAs, ROC, RSI, and derived score to judge whether shorts should be capped.",
+    "If momentum is bullish, do not hesitate to block shorts; if bearish, encourage flexibility.",
+    "Explain the verdict in first person, referencing the metrics that mattered.",
+)
+ALLOWED_SIGNALS = ["bullish_momentum", "neutral", "bearish_momentum"]
 
 
 ##### Momentum Regime Analyst #####
@@ -77,7 +91,12 @@ def momentum_guardian_agent(state: AgentState, agent_id: str = "momentum_guardia
 
         fast_val = _safe_float(ema_fast.iloc[-1], current_price)
         slow_val = _safe_float(ema_slow.iloc[-1], current_price)
-        long_val = _safe_float(ema_long.iloc[-1], slow_val if ema_long is not None else slow_val)
+        if ema_long is not None:
+            long_val = _safe_float(ema_long.iloc[-1], slow_val)
+            ema200_metric = long_val
+        else:
+            long_val = slow_val
+            ema200_metric = None
         roc_val = _safe_float(roc_10.iloc[-1], 0.0)
         rsi_val = _safe_float(rsi_14.iloc[-1], 50.0)
 
@@ -96,62 +115,71 @@ def momentum_guardian_agent(state: AgentState, agent_id: str = "momentum_guardia
 
         score = float(np.clip(score, -1.0, 1.0))
 
-        if score <= -0.2:
-            signal = "bearish_momentum"
-        elif score >= 0.2:
-            signal = "bullish_momentum"
-        else:
-            signal = "neutral"
-
-        # Default exposure caps based on regime
-        if score >= 0.4:
-            allow_short = False
-            max_short_pct = 0.0
-            confidence = int(min(100, 60 + abs(score) * 40))
-        elif score >= 0.2:
-            allow_short = False
-            max_short_pct = 0.0
-            confidence = int(min(100, 50 + abs(score) * 50))
-        elif score >= 0.0:
-            allow_short = True
-            max_short_pct = 0.05
-            confidence = int(min(100, 40 + abs(score) * 40))
-        elif score <= -0.6:
-            allow_short = True
-            max_short_pct = 0.15
-            confidence = int(min(100, 60 + abs(score) * 40))
-        else:
-            allow_short = True
-            max_short_pct = 0.10
-            confidence = int(min(100, 50 + abs(score) * 40))
-
-        reasoning = (
-            f"Price {current_price:.2f} vs EMA55 {slow_val:.2f}, EMA200 {long_val:.2f}; "
-            f"ROC10 {roc_val:.2%}, RSI14 {rsi_val:.1f}."
+        bullish_stack = (
+            current_price > slow_val > long_val
+            and slope_mid >= -0.005
+            and slope_long >= -0.002
+            and roc_val >= -0.01
+        )
+        bearish_stack = (
+            current_price < slow_val < long_val
+            and slope_mid <= 0.005
+            and slope_long <= 0.002
+            and roc_val <= 0.01
         )
 
-        constraints: dict[str, Any] = {
-            "allow_short": allow_short,
-            "max_short_exposure_pct": round(max_short_pct, 4) if allow_short else 0.0,
+        ema200_text = f"{ema200_metric:.2f}" if ema200_metric is not None else "N/A"
+
+        metrics = {
+            "price": current_price,
+            "ema21": fast_val,
+            "ema55": slow_val,
+            "ema200": ema200_metric,
+            "roc_10": roc_val,
+            "rsi_14": rsi_val,
             "momentum_score": round(score, 3),
-            "trend_bias": signal,
         }
-        if not allow_short:
-            constraints["block_new_shorts"] = True
+
+        suggestions = {
+            "block_shorts_hint": score >= 0.2,
+            "preferred_direction_hint": "bullish" if score >= 0.2 else "bearish" if score <= -0.2 else "neutral",
+            "max_short_pct_hint": (
+                0.0 if score >= 0.2 else 0.15 if score <= -0.6 else 0.1 if score <= -0.2 else 0.05
+            ),
+        }
+
+        observations = {
+            "ticker": ticker,
+            "metrics": metrics,
+            "momentum_components": {
+                "bullish_stack": bool(bullish_stack),
+                "bearish_stack": bool(bearish_stack),
+                "ema200_text": ema200_text,
+            },
+            "suggestions": suggestions,
+        }
+
+        decision = persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="neutral",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to neutral after missing persona response.",
+        )
 
         momentum_view[ticker] = {
-            "signal": signal,
-            "confidence": int(np.clip(confidence, 0, 100)),
-            "reasoning": reasoning,
-            "constraints": constraints,
-            "metrics": {
-                "price": current_price,
-                "ema21": fast_val,
-                "ema55": slow_val,
-                "ema200": long_val,
-                "roc_10": roc_val,
-                "rsi_14": rsi_val,
-            },
+            "signal": decision.signal,
+            "confidence": int(np.clip(decision.confidence, 0, 100)),
+            "reasoning": decision.reasoning,
+            "constraints": decision.constraints or {},
+            "metrics": metrics,
+            "meta": {"observations": observations},
         }
 
     message = HumanMessage(content=json.dumps(momentum_view), name=agent_id)

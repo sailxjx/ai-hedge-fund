@@ -90,6 +90,10 @@ COMPANY_NEWS_MAX_PAGES=8
 
 ## How to Run
 
+### Observation-First Personas
+
+All analyst agents now emit raw observations and delegate trade intent to their anthropomorphic personas. When extending the platform, focus on enriching the observation payloads instead of encoding rule-based signals. See `src/agents/persona_utils.py::persona_from_observations` for the shared helper that every analyst uses to package metrics for the LLM personas. Backtest summaries now include turnover rate so you can quickly sanity-check how much gross notional the persona ensemble traded over the window.
+
 ### ⌨️ Command Line Interface
 
 You can run the AI Hedge Fund directly via terminal. This approach offers more granular control and is useful for automation, scripting, and integration purposes.
@@ -135,6 +139,17 @@ poetry run python src/backtester.py --ticker AAPL,MSFT,NVDA
 
 
 Note: The `--ollama`, `--start-date`, and `--end-date` flags work for the backtester, as well!
+Add `--portfolio-seed path/to/snapshot.json` to seed the run with a preexisting portfolio state (e.g., short hangover replays).
+
+#### Summarize Backtest Logs
+```bash
+poetry run python -m src.backtesting.evaluate_logs \
+  --logs baseline=log/backtest_baseline_crash.log candidate=log/backtest_ml_crash.log \
+  --overrides baseline=log/risk_overrides/backtest_baseline_crash.jsonl candidate=log/risk_overrides/backtest_ml_crash.jsonl \
+  --output log/backtest_metrics/summary.csv
+```
+Use `--json` to emit machine-readable summaries capturing Sharpe/Sortino/return plus override counts for regression tracking.
+
 
 ### 🖥️ Web Application
 

@@ -46,4 +46,4 @@ def test_compute_portfolio_summary(portfolio, prices):
     assert summary["total_value"] == total_value
     assert summary["return_pct"] == 0.0
     assert summary["sharpe_ratio"] == 1.0
-
+    assert summary["turnover_rate"] is None

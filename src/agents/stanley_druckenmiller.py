@@ -115,16 +115,7 @@ def stanley_druckenmiller_agent(state: AgentState, agent_id: str = "stanley_druc
 
         max_possible_score = 10
 
-        # Simple bullish/neutral/bearish signal
-        if total_score >= 7.5:
-            signal = "bullish"
-        elif total_score <= 4.5:
-            signal = "bearish"
-        else:
-            signal = "neutral"
-
         analysis_data[ticker] = {
-            "signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
             "growth_momentum_analysis": growth_momentum_analysis,

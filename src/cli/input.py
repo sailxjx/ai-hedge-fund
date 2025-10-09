@@ -3,6 +3,7 @@ import sys
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import argparse
+import json
 import questionary
 from colorama import Fore, Style
 
@@ -11,7 +12,7 @@ from src.llm.models import LLM_ORDER, OLLAMA_LLM_ORDER, get_model_info, ModelPro
 from src.utils.ollama import ensure_ollama_and_model
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Any
 
 
 def add_common_args(
@@ -292,10 +293,12 @@ class CLIInputs:
     end_date: str
     initial_cash: float
     margin_requirement: float
+    initial_long_pct: float = 0.0
     show_reasoning: bool = False
     show_agent_graph: bool = False
     log_file: Optional[str] = None
     raw_args: Optional[argparse.Namespace] = None
+    portfolio_seed: Optional[dict[str, Any]] = None
 
 
 def parse_cli_inputs(
@@ -329,6 +332,21 @@ def parse_cli_inputs(
         help="Initial margin requirement ratio for shorts (e.g., 0.5 for 50%%). Defaults to 0.0",
     )
 
+    parser.add_argument(
+        "--portfolio-seed",
+        dest="portfolio_seed",
+        type=str,
+        help="Path to a JSON file containing an initial portfolio snapshot.",
+    )
+
+    parser.add_argument(
+        "--initial-long-pct",
+        dest="initial_long_pct",
+        type=float,
+        default=0.0,
+        help="Percentage of initial cash to allocate to long positions at the start of the run (0-100).",
+    )
+
     if include_reasoning_flag:
         parser.add_argument("--show-reasoning", action="store_true", help="Show reasoning from each agent")
     if include_graph_flag:
@@ -355,6 +373,19 @@ def parse_cli_inputs(
         model_name, model_provider = select_model(use_ollama)
     start_date, end_date = resolve_dates(getattr(args, "start_date", None), getattr(args, "end_date", None), default_months_back=default_months_back)
 
+    seed_snapshot = None
+    seed_path = getattr(args, "portfolio_seed", None)
+    if seed_path:
+        try:
+            with open(seed_path, "r", encoding="utf-8") as handle:
+                seed_snapshot = json.load(handle)
+        except FileNotFoundError as exc:
+            parser.error(f"Portfolio seed file not found: {seed_path}")
+        except json.JSONDecodeError as exc:
+            parser.error(f"Portfolio seed file '{seed_path}' is not valid JSON: {exc}")
+        except OSError as exc:
+            parser.error(f"Failed to read portfolio seed '{seed_path}': {exc}")
+
     return CLIInputs(
         tickers=tickers,
         selected_analysts=selected_analysts,
@@ -364,8 +395,10 @@ def parse_cli_inputs(
         end_date=end_date,
         initial_cash=getattr(args, "initial_cash", 100000.0),
         margin_requirement=getattr(args, "margin_requirement", 0.0),
+        initial_long_pct=min(100.0, max(0.0, getattr(args, "initial_long_pct", 0.0))),
         show_reasoning=getattr(args, "show_reasoning", False),
         show_agent_graph=getattr(args, "show_agent_graph", False),
         log_file=getattr(args, "log_file", None),
         raw_args=args,
+        portfolio_seed=seed_snapshot,
     )

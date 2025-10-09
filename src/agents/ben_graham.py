@@ -57,15 +57,13 @@ def ben_graham_agent(state: AgentState, agent_id: str = "ben_graham_agent"):
         total_score = earnings_analysis["score"] + strength_analysis["score"] + valuation_analysis["score"]
         max_possible_score = 15  # total possible from the three analysis functions
 
-        # Map total_score to signal
-        if total_score >= 0.7 * max_possible_score:
-            signal = "bullish"
-        elif total_score <= 0.3 * max_possible_score:
-            signal = "bearish"
-        else:
-            signal = "neutral"
-
-        analysis_data[ticker] = {"signal": signal, "score": total_score, "max_score": max_possible_score, "earnings_analysis": earnings_analysis, "strength_analysis": strength_analysis, "valuation_analysis": valuation_analysis}
+        analysis_data[ticker] = {
+            "score": total_score,
+            "max_score": max_possible_score,
+            "earnings_analysis": earnings_analysis,
+            "strength_analysis": strength_analysis,
+            "valuation_analysis": valuation_analysis,
+        }
 
         progress.update_status(agent_id, ticker, "Generating Ben Graham analysis")
         graham_output = generate_graham_output(

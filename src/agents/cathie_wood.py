@@ -75,14 +75,13 @@ def cathie_wood_agent(state: AgentState, agent_id: str = "cathie_wood_agent"):
         total_score = disruptive_analysis["score"] + innovation_analysis["score"] + valuation_analysis["score"]
         max_possible_score = 15  # Adjust weighting as desired
 
-        if total_score >= 0.7 * max_possible_score:
-            signal = "bullish"
-        elif total_score <= 0.3 * max_possible_score:
-            signal = "bearish"
-        else:
-            signal = "neutral"
-
-        analysis_data[ticker] = {"signal": signal, "score": total_score, "max_score": max_possible_score, "disruptive_analysis": disruptive_analysis, "innovation_analysis": innovation_analysis, "valuation_analysis": valuation_analysis}
+        analysis_data[ticker] = {
+            "score": total_score,
+            "max_score": max_possible_score,
+            "disruptive_analysis": disruptive_analysis,
+            "innovation_analysis": innovation_analysis,
+            "valuation_analysis": valuation_analysis,
+        }
 
         progress.update_status(agent_id, ticker, "Generating Cathie Wood analysis")
         cw_output = generate_cathie_wood_output(

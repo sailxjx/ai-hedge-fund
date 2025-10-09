@@ -86,31 +86,10 @@ def rakesh_jhunjhunwala_agent(state: AgentState, agent_id: str = "rakesh_jhunjhu
         # Fixed: Correct max_score calculation based on actual scoring breakdown
         max_score = 24  # 8(prof) + 7(growth) + 4(bs) + 3(cf) + 2(mgmt) = 24
 
-        # Calculate margin of safety
         margin_of_safety = (
             (intrinsic_value - market_cap) / market_cap if intrinsic_value and market_cap else None
         )
-
-        # Jhunjhunwala's decision rules (30% minimum margin of safety for conviction)
-        if margin_of_safety is not None and margin_of_safety >= 0.30:
-            signal = "bullish"
-        elif margin_of_safety is not None and margin_of_safety <= -0.30:
-            signal = "bearish"
-        else:
-            # Use quality score as tie-breaker for neutral cases
-            quality_score = assess_quality_metrics(financial_line_items)
-            if quality_score >= 0.7 and total_score >= max_score * 0.6:
-                signal = "bullish"  # High quality company at fair price
-            elif quality_score <= 0.4 or total_score <= max_score * 0.3:
-                signal = "bearish"  # Poor quality or fundamentals
-            else:
-                signal = "neutral"
-
-        # Confidence based on margin of safety and quality
-        if margin_of_safety is not None:
-            confidence = min(max(abs(margin_of_safety) * 150, 20), 95)  # 20-95% range
-        else:
-            confidence = min(max((total_score / max_score) * 100, 10), 80)  # Based on score
+        quality_score = assess_quality_metrics(financial_line_items)
 
         # Create comprehensive analysis summary
         intrinsic_value_analysis = analyze_rakesh_jhunjhunwala_style(
@@ -120,10 +99,10 @@ def rakesh_jhunjhunwala_agent(state: AgentState, agent_id: str = "rakesh_jhunjhu
         )
 
         analysis_data[ticker] = {
-            "signal": signal,
             "score": total_score,
             "max_score": max_score,
             "margin_of_safety": margin_of_safety,
+            "quality_score": quality_score,
             "growth_analysis": growth_analysis,
             "profitability_analysis": profitability_analysis,
             "balancesheet_analysis": balancesheet_analysis,

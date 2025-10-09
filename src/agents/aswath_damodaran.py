@@ -92,16 +92,7 @@ def aswath_damodaran_agent(state: AgentState, agent_id: str = "aswath_damodaran_
             (intrinsic_value - market_cap) / market_cap if intrinsic_value and market_cap else None
         )
 
-        # Decision rules (Damodaran tends to act with ~20-25 % MOS)
-        if margin_of_safety is not None and margin_of_safety >= 0.25:
-            signal = "bullish"
-        elif margin_of_safety is not None and margin_of_safety <= -0.25:
-            signal = "bearish"
-        else:
-            signal = "neutral"
-
         analysis_data[ticker] = {
-            "signal": signal,
             "score": total_score,
             "max_score": max_score,
             "margin_of_safety": margin_of_safety,

@@ -99,17 +99,15 @@ def charlie_munger_agent(state: AgentState, agent_id: str = "charlie_munger_agen
         )
         
         max_possible_score = 10  # Scale to 0-10
-                
-        # Generate a simple buy/hold/sell signal
-        if total_score >= 7.5:  # Munger has very high standards
-            signal = "bullish"
-        elif total_score <= 5.5:
-            signal = "bearish"
-        else:
-            signal = "neutral"
         
+        if total_score >= 7.5:
+            signal_hint = "bullish"
+        elif total_score <= 5.5:
+            signal_hint = "bearish"
+        else:
+            signal_hint = "neutral"
+                
         analysis_data[ticker] = {
-            "signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
             "moat_analysis": moat_analysis,
@@ -117,7 +115,8 @@ def charlie_munger_agent(state: AgentState, agent_id: str = "charlie_munger_agen
             "predictability_analysis": predictability_analysis,
             "valuation_analysis": valuation_analysis,
             # Include some qualitative assessment from news
-            "news_sentiment": analyze_news_sentiment(company_news) if company_news else "No news data available"
+            "news_sentiment": analyze_news_sentiment(company_news) if company_news else "No news data available",
+            "signal_hint": signal_hint,
         }
         
         progress.update_status(agent_id, ticker, "Generating Charlie Munger analysis")
@@ -126,7 +125,7 @@ def charlie_munger_agent(state: AgentState, agent_id: str = "charlie_munger_agen
             analysis_data=analysis_data[ticker],
             state=state,
             agent_id=agent_id,
-            confidence_hint=compute_confidence(analysis_data[ticker], signal)
+            confidence_hint=compute_confidence(analysis_data[ticker], signal_hint)
         )
         
         munger_analysis[ticker] = {

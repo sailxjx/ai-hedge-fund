@@ -4,6 +4,7 @@ import sys
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import argparse
+import json
 
 from colorama import Fore, Style, init
 import questionary
@@ -31,13 +32,35 @@ def main() -> int:
         help="Start date YYYY-MM-DD",
     )
     parser.add_argument("--initial-capital", type=float, default=100000)
+    parser.add_argument(
+        "--initial-long-pct",
+        type=float,
+        default=0.0,
+        help="Percentage of available cash to deploy into long positions at the start of the backtest (0-100).",
+    )
     parser.add_argument("--margin-requirement", type=float, default=0.0)
     parser.add_argument("--analysts", type=str, required=False)
     parser.add_argument("--analysts-all", action="store_true")
     parser.add_argument("--ollama", action="store_true")
+    parser.add_argument("--portfolio-seed", type=str, help="Path to a JSON portfolio snapshot")
 
     args = parser.parse_args()
     init(autoreset=True)
+
+    seed_snapshot = None
+    if args.portfolio_seed:
+        try:
+            with open(args.portfolio_seed, "r", encoding="utf-8") as handle:
+                seed_snapshot = json.load(handle)
+        except FileNotFoundError:
+            print(f"{Fore.RED}Portfolio seed file not found: {args.portfolio_seed}{Style.RESET_ALL}")
+            return 1
+        except json.JSONDecodeError as exc:
+            print(f"{Fore.RED}Invalid portfolio seed JSON: {exc}{Style.RESET_ALL}")
+            return 1
+        except OSError as exc:
+            print(f"{Fore.RED}Failed to read portfolio seed: {exc}{Style.RESET_ALL}")
+            return 1
 
     tickers = [t.strip() for t in args.tickers.split(",")] if args.tickers else []
 
@@ -138,6 +161,8 @@ def main() -> int:
         model_provider=model_provider,
         selected_analysts=selected_analysts,
         initial_margin_requirement=args.margin_requirement,
+        portfolio_seed=seed_snapshot,
+        initial_long_pct=args.initial_long_pct,
     )
 
     metrics = engine.run_backtest()
@@ -166,7 +191,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
 
 

@@ -8,9 +8,12 @@ import numpy as np
 import pandas as pd
 from langchain_core.messages import HumanMessage
 
+from src.agents.persona_utils import persona_from_observations
+
 from src.graph.state import AgentState, show_agent_reasoning
 from src.tools.api import get_prices, prices_to_df
 from src.utils.api_key import get_api_key_from_state
+from src.utils.calibration import apply_platt, get_platt_parameters
 from src.utils.progress import progress
 
 
@@ -28,14 +31,16 @@ def _prepare_features(closes: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
     closes = closes.astype(float)
     returns = closes.pct_change()
 
-    features = pd.DataFrame({
-        "ret_1": returns,
-        "ret_5": closes.pct_change(5),
-        "ret_21": closes.pct_change(21),
-        "vol_5": returns.rolling(5).std(ddof=0),
-        "vol_21": returns.rolling(21).std(ddof=0),
-        "ema_gap": closes / closes.ewm(span=21, adjust=False).mean() - 1,
-    })
+    features = pd.DataFrame(
+        {
+            "ret_1": returns,
+            "ret_5": closes.pct_change(5),
+            "ret_21": closes.pct_change(21),
+            "vol_5": returns.rolling(5).std(ddof=0),
+            "vol_21": returns.rolling(21).std(ddof=0),
+            "ema_gap": closes / closes.ewm(span=21, adjust=False).mean() - 1,
+        }
+    )
 
     future_returns = returns.shift(-1)
 
@@ -60,6 +65,19 @@ def _logistic_regression(X: np.ndarray, y: np.ndarray, *, lr: float = 0.1, epoch
 def _expected_value(prob: float, up_ret: float, down_ret: float) -> float:
     return prob * up_ret + (1.0 - prob) * down_ret
 
+
+
+PERSONA_NAME = "Nova"
+PERSONA_ROLE = "a momentum surfer who translates logistic edges into positioning guidance"
+PERSONA_BACKSTORY = (
+    "Nova rode quantitative momentum models for years and now narrates when the book should lean bullish or bearish."
+)
+PERSONA_INSTRUCTIONS = (
+    "Base the signal entirely on the observed probabilities, expected returns, and drawdown context.",
+    "Set constraints only when the observations justify them; otherwise leave them empty.",
+    "Explain the judgement in first person, citing the observations that drove the decision.",
+)
+ALLOWED_SIGNALS = ["bullish", "bearish", "neutral"]
 
 ##### Growth Momentum Analyst #####
 def growth_momentum_agent(state: AgentState, agent_id: str = "growth_momentum_agent"):
@@ -125,11 +143,15 @@ def growth_momentum_agent(state: AgentState, agent_id: str = "growth_momentum_ag
 
         weights = _logistic_regression(train_X, train_y)
         logits = float(latest_features @ weights)
-        prob_up = 1.0 / (1.0 + np.exp(-np.clip(logits, -50, 50)))
+        raw_prob_up = 1.0 / (1.0 + np.exp(-np.clip(logits, -50, 50)))
 
-        future_returns = features_df.index.to_series().map(
-            df["close"].pct_change().shift(-1)
-        ).dropna()
+        calibration_params = get_platt_parameters("growth_momentum", ticker)
+        if calibration_params:
+            prob_up = apply_platt(logits, calibration_params)
+        else:
+            prob_up = raw_prob_up
+
+        future_returns = features_df.index.to_series().map(df["close"].pct_change().shift(-1)).dropna()
 
         up_returns = future_returns[future_returns > 0]
         down_returns = future_returns[future_returns <= 0]
@@ -139,56 +161,73 @@ def growth_momentum_agent(state: AgentState, agent_id: str = "growth_momentum_ag
         expected = _expected_value(prob_up, avg_up, avg_down)
         std_future = float(future_returns.std(ddof=0)) if len(future_returns) > 1 else 0.01
 
-        signal = "neutral"
-        reasoning = (
-            f"Logistic classifier probability of upside {prob_up:.2%}; expected next-day return {expected:.3%}."
-        )
-        constraints: dict[str, Any] = {}
-
         denom = std_future if std_future > 0 else 0.01
         tolerance = 0.1 * denom
         strength = expected / denom
 
-        if expected > tolerance:
-            signal = "bullish"
-            constraints["preferred_direction"] = "long"
-            constraints["max_short_exposure_pct"] = float(max(0.0, 0.25 * max(0.0, 1.0 - prob_up)))
-            constraints["max_additional_short_shares"] = 0
-            confidence_raw = prob_up
-        elif expected < -tolerance:
-            signal = "bearish"
-            constraints["preferred_direction"] = "short"
-            constraints["max_short_exposure_pct"] = float(min(0.25, 0.25 * min(1.0, 1.0 - prob_up)))
-            confidence_raw = 1.0 - prob_up
-        else:
-            confidence_raw = 0.5 + strength * 0.1
-
-        confidence = int(np.clip(confidence_raw * 100, 0, 100))
-
         indicators = {
             "prob_up": prob_up,
+            "raw_prob_up": raw_prob_up,
             "expected_return": expected,
             "avg_up": avg_up,
             "avg_down": avg_down,
             "std_future": std_future,
             "base_rate": float(train_y.mean()),
+            "logit": logits,
+            "calibration_applied": bool(calibration_params),
         }
+        if calibration_params:
+            indicators["calibration"] = calibration_params
+
+        observations = {
+            "ticker": ticker,
+            "logistic": {
+                "raw_prob_up": raw_prob_up,
+                "calibrated_prob_up": prob_up,
+                "expected_return": expected,
+                "std_future": std_future,
+                "tolerance": tolerance,
+                "strength_ratio": strength,
+            },
+            "returns_context": {
+                "avg_up": avg_up,
+                "avg_down": avg_down,
+                "future_return_std": std_future,
+            },
+            "weights": weights.tolist(),
+            "indicators": indicators,
+            "calibration": calibration_params,
+        }
+
+        decision = persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="neutral",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to neutral after observation-only fallback.",
+        )
+        confidence = int(np.clip(decision.confidence, 0, 100))
+        constraints = decision.constraints or {}
 
         payload: dict[str, Any] = {
-            "signal": signal,
+            "signal": decision.signal,
             "confidence": confidence,
-            "reasoning": reasoning,
+            "reasoning": decision.reasoning,
+            "constraints": constraints,
             "indicators": indicators,
             "model_weights": weights.tolist(),
+            "meta": {
+                "observations": observations,
+            },
         }
-        if constraints:
-            payload["constraints"] = constraints
 
-        progress.update_status(
-            agent_id,
-            ticker,
-            f"Prob(up) {prob_up:.2%}, expected {expected:.3%} → {signal.upper()}"
-        )
+        progress.update_status(agent_id, ticker, f"Prob(up) {prob_up:.2%}, expected {expected:.3%} → {payload['signal'].upper()}")
 
         signals[ticker] = payload
 

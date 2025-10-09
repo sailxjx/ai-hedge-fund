@@ -106,18 +106,10 @@ def michael_burry_agent(state: AgentState, agent_id: str = "michael_burry_agent"
             + contrarian_analysis["max_score"]
         )
 
-        if total_score >= 0.7 * max_score:
-            signal = "bullish"
-        elif total_score <= 0.3 * max_score:
-            signal = "bearish"
-        else:
-            signal = "neutral"
-
         # ------------------------------------------------------------------
         # Collect data for LLM reasoning & output
         # ------------------------------------------------------------------
         analysis_data[ticker] = {
-            "signal": signal,
             "score": total_score,
             "max_score": max_score,
             "value_analysis": value_analysis,

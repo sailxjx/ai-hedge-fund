@@ -9,9 +9,12 @@ import numpy as np
 import pandas as pd
 from langchain_core.messages import HumanMessage
 
+from src.agents.persona_utils import persona_from_observations
+
 from src.graph.state import AgentState, show_agent_reasoning
 from src.tools.api import get_prices, prices_to_df
 from src.utils.api_key import get_api_key_from_state
+from src.utils.calibration import apply_platt, get_platt_parameters
 from src.utils.progress import progress
 
 
@@ -28,6 +31,19 @@ def _extend_start(start_date: str | None, buffer_days: int = 120) -> str | None:
 def _norm_cdf(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
+
+
+PERSONA_NAME = "Mira"
+PERSONA_ROLE = "a mean-reversion sleuth translating z-scores into positioning guidance"
+PERSONA_BACKSTORY = (
+    "Mira built statistical arbitrage desks and now narrates when stretched prices should mean-revert."
+)
+PERSONA_INSTRUCTIONS = (
+    "Use the z-score and reversion probabilities to decide the stance.",
+    "When probabilities are marginal, feel free to keep things neutral instead of forcing trades.",
+    "Explain the judgement in first person, referencing the quantitative evidence.",
+)
+ALLOWED_SIGNALS = ["bullish", "bearish", "neutral"]
 
 ##### Statistical Mean Reversion Analyst #####
 def stat_mean_reversion_agent(state: AgentState, agent_id: str = "stat_mean_reversion_agent"):
@@ -90,28 +106,14 @@ def stat_mean_reversion_agent(state: AgentState, agent_id: str = "stat_mean_reve
             continue
 
         z_score = (latest_close - latest_mean) / latest_std
-        prob_revert_up = _norm_cdf(-z_score)
-        prob_revert_down = 1.0 - prob_revert_up
+        raw_prob_revert_up = _norm_cdf(-z_score)
 
-        signal = "neutral"
-        constraints: dict[str, Any] = {}
-        reasoning = (
-            f"Price deviation z-score {z_score:.2f}; reversion prob up {prob_revert_up:.2%}, down {prob_revert_down:.2%}."
-        )
-
-        if z_score <= -0.5:
-            signal = "bullish"
-            constraints["preferred_direction"] = "long"
-            constraints["max_short_exposure_pct"] = float(0.25 * (1.0 - prob_revert_up))
-            constraints["max_additional_short_shares"] = 0
-            confidence = int(np.clip(prob_revert_up * 120, 55, 99))
-        elif z_score >= 0.5:
-            signal = "bearish"
-            constraints["preferred_direction"] = "short"
-            constraints["max_short_exposure_pct"] = float(0.25 * prob_revert_down)
-            confidence = int(np.clip(prob_revert_down * 120, 55, 99))
+        calibration_params = get_platt_parameters("stat_mean_reversion", ticker)
+        if calibration_params:
+            prob_revert_up = apply_platt(z_score, calibration_params)
         else:
-            confidence = int(np.clip(50 + z_score * 20, 30, 60))
+            prob_revert_up = raw_prob_revert_up
+        prob_revert_down = 1.0 - prob_revert_up
 
         indicators = {
             "z_score": float(z_score),
@@ -119,22 +121,58 @@ def stat_mean_reversion_agent(state: AgentState, agent_id: str = "stat_mean_reve
             "rolling_std": float(latest_std),
             "prob_revert_up": float(prob_revert_up),
             "prob_revert_down": float(prob_revert_down),
+            "raw_prob_revert_up": float(raw_prob_revert_up),
+            "calibration_applied": bool(calibration_params),
+        }
+        if calibration_params:
+            indicators["calibration"] = calibration_params
+
+        thresholds = {
+            "bullish_prob": 0.6,
+            "bearish_prob": 0.4,
         }
 
-        payload: dict[str, Any] = {
-            "signal": signal,
-            "confidence": confidence,
-            "reasoning": reasoning,
+        observations = {
+            "ticker": ticker,
+            "z_score": float(z_score),
+            "probabilities": {
+                "prob_revert_up": float(prob_revert_up),
+                "prob_revert_down": float(prob_revert_down),
+                "raw_prob_revert_up": float(raw_prob_revert_up),
+            },
+            "calibration_applied": bool(calibration_params),
+            "thresholds": thresholds,
             "indicators": indicators,
         }
-        if constraints:
-            payload["constraints"] = constraints
 
-        progress.update_status(
-            agent_id,
-            ticker,
-            f"z={z_score:.2f} → {signal.upper()} ({confidence})"
+        decision = persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="neutral",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to neutral after observation-only fallback.",
         )
+
+        confidence = int(np.clip(decision.confidence, 0, 100))
+        constraints = decision.constraints or {}
+        payload: dict[str, Any] = {
+            "signal": decision.signal,
+            "confidence": confidence,
+            "reasoning": decision.reasoning,
+            "constraints": constraints,
+            "indicators": indicators,
+            "meta": {
+                "observations": observations,
+            },
+        }
+
+        progress.update_status(agent_id, ticker, f"z={z_score:.2f} → {payload['signal'].upper()} ({payload['confidence']})")
 
         signals[ticker] = payload
 
@@ -150,4 +188,3 @@ def stat_mean_reversion_agent(state: AgentState, agent_id: str = "stat_mean_reve
         "messages": state["messages"] + [message],
         "data": state["data"],
     }
-

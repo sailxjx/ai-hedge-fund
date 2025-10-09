@@ -1,7 +1,10 @@
 import os
-import pytest
-from unittest.mock import Mock, patch, call
+from datetime import datetime
+from unittest.mock import ANY, Mock, patch, call
 
+import pytest
+
+from src.backtesting.metrics import PerformanceMetricsCalculator
 from src.tools.api import _make_api_request, get_prices
 
 class TestRateLimiting:
@@ -34,8 +37,8 @@ class TestRateLimiting:
         # Verify requests.get was called twice
         assert mock_get.call_count == 2
         mock_get.assert_has_calls([
-            call(url, headers=headers),
-            call(url, headers=headers)
+            call(url, headers=headers, timeout=ANY),
+            call(url, headers=headers, timeout=ANY)
         ])
         
         # Verify sleep was called once with 60 seconds (first retry)
@@ -106,8 +109,8 @@ class TestRateLimiting:
         # Verify requests.post was called twice
         assert mock_post.call_count == 2
         mock_post.assert_has_calls([
-            call(url, headers=headers, json=json_data),
-            call(url, headers=headers, json=json_data)
+            call(url, headers=headers, json=json_data, timeout=ANY),
+            call(url, headers=headers, json=json_data, timeout=ANY)
         ])
         
         # Verify sleep was called once with 60 seconds (first retry)
@@ -212,6 +215,125 @@ class TestRateLimiting:
         mock_sleep.assert_called_once_with(60)
         
         # Verify cache operations
+        mock_cache.get_prices.assert_called_once()
+        mock_cache.set_prices.assert_called_once()
+
+    @patch('src.tools.api._cache')
+    @patch('src.tools.api.requests.get')
+    @patch('src.tools.api._make_api_request')
+    def test_stooq_fallback_for_index(self, mock_api_request, mock_requests_get, mock_cache):
+        """Ensure Stooq fallback provides index data when vendor API rejects the ticker."""
+
+        mock_cache.get_prices.return_value = None
+        mock_cache.set_prices.return_value = None
+
+        api_failure = Mock()
+        api_failure.status_code = 404
+        api_failure.text = "No data"
+        mock_api_request.return_value = api_failure
+
+        stooq_response = Mock()
+        stooq_response.status_code = 200
+        stooq_response.text = (
+            "Date,Open,High,Low,Close,Volume\n"
+            "2024-07-01,5471.08,5479.55,5446.53,5475.09,2433991467\n"
+            "2024-07-02,5469.45,5488.52,5452.68,5481.11,2250709371\n"
+        )
+        mock_requests_get.return_value = stooq_response
+
+        result = get_prices("^GSPC", "2024-07-01", "2024-07-05")
+
+        assert len(result) == 2
+        assert result[0].close == 5475.09
+        assert result[1].close == 5481.11
+
+        mock_cache.get_prices.assert_called_once()
+        mock_cache.set_prices.assert_called_once()
+        mock_requests_get.assert_called_once()
+
+    @patch('src.tools.api._cache')
+    @patch('src.tools.api.requests.get')
+    @patch('src.tools.api._make_api_request')
+    def test_stooq_fallback_partial_coverage_handles_sparse_benchmark(
+        self,
+        mock_api_request,
+        mock_requests_get,
+        mock_cache,
+    ):
+        """Fallback data with gaps should still support downstream metric calculations."""
+
+        mock_cache.get_prices.return_value = None
+        mock_cache.set_prices.return_value = None
+
+        api_failure = Mock()
+        api_failure.status_code = 404
+        api_failure.text = "Not Found"
+        mock_api_request.return_value = api_failure
+
+        stooq_response = Mock()
+        stooq_response.status_code = 200
+        stooq_response.text = (
+            "Date,Open,High,Low,Close,Volume\n"
+            "2024-07-02,5471.08,5479.55,5446.53,5475.09,2433991467\n"
+            "2024-07-03,5480.00,5495.10,5468.44,5488.90,2132210441\n"
+        )
+        mock_requests_get.return_value = stooq_response
+
+        prices = get_prices("^GSPC", "2024-07-01", "2024-07-05")
+
+        assert len(prices) == 2
+
+        calc = PerformanceMetricsCalculator(annual_trading_days=252, annual_rf_rate=0.0)
+        portfolio_vals = [
+            {
+                "Date": datetime(2024, 7, 1),
+                "Portfolio Value": 100_000.0,
+                "Long Exposure": 0.0,
+                "Short Exposure": 0.0,
+                "Gross Exposure": 0.0,
+                "Net Exposure": 0.0,
+                "Long/Short Ratio": float("inf"),
+            },
+            {
+                "Date": datetime(2024, 7, 2),
+                "Portfolio Value": 101_500.0,
+                "Long Exposure": 0.0,
+                "Short Exposure": 0.0,
+                "Gross Exposure": 0.0,
+                "Net Exposure": 0.0,
+                "Long/Short Ratio": float("inf"),
+            },
+            {
+                "Date": datetime(2024, 7, 3),
+                "Portfolio Value": 100_800.0,
+                "Long Exposure": 0.0,
+                "Short Exposure": 0.0,
+                "Gross Exposure": 0.0,
+                "Net Exposure": 0.0,
+                "Long/Short Ratio": float("inf"),
+            },
+        ]
+
+        closes_by_date: dict[datetime, float] = {}
+        for price in prices:
+            timestamp = datetime.strptime(price.time, "%Y-%m-%dT%H:%M:%SZ")
+            closes_by_date[timestamp.replace(tzinfo=None)] = price.close
+
+        benchmark_values = []
+        last_close: float | None = None
+        for day in range(1, 4):
+            current = datetime(2024, 7, day)
+            close = closes_by_date.get(current)
+            if close is not None:
+                last_close = close
+            benchmark_values.append({"Date": current, "Benchmark Value": last_close})
+
+        metrics = calc.compute_metrics(portfolio_vals, benchmark_values)
+
+        assert metrics["sharpe_ratio"] is not None
+        assert metrics["information_ratio"] is None
+
+        mock_requests_get.assert_called_once()
         mock_cache.get_prices.assert_called_once()
         mock_cache.set_prices.assert_called_once()
 

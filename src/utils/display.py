@@ -5,6 +5,36 @@ import os
 import json
 
 
+def _wrap_text(text: str, width: int = 60) -> str:
+    """Wrap a block of text at the given character width."""
+    if not text:
+        return ""
+
+    words = text.split()
+    if not words:
+        return text
+
+    lines: list[str] = []
+    current_line: list[str] = []
+    current_len = 0
+
+    for word in words:
+        separator = 1 if current_line else 0
+        projected = current_len + len(word) + separator
+        if projected > width and current_line:
+            lines.append(" ".join(current_line))
+            current_line = [word]
+            current_len = len(word)
+        else:
+            current_line.append(word)
+            current_len = projected
+
+    if current_line:
+        lines.append(" ".join(current_line))
+
+    return "\n".join(lines)
+
+
 def sort_agent_signals(signals):
     """Sort agent signals in a consistent order."""
     # Create order mapping from ANALYST_ORDER
@@ -56,7 +86,7 @@ def print_trading_output(result: dict) -> None:
             reasoning_str = ""
             if "reasoning" in signal and signal["reasoning"]:
                 reasoning = signal["reasoning"]
-                
+
                 # Handle different types of reasoning (string, dict, etc.)
                 if isinstance(reasoning, str):
                     reasoning_str = reasoning
@@ -66,25 +96,8 @@ def print_trading_output(result: dict) -> None:
                 else:
                     # Convert any other type to string
                     reasoning_str = str(reasoning)
-                
-                # Wrap long reasoning text to make it more readable
-                wrapped_reasoning = ""
-                current_line = ""
-                # Use a fixed width of 60 characters to match the table column width
-                max_line_length = 60
-                for word in reasoning_str.split():
-                    if len(current_line) + len(word) + 1 > max_line_length:
-                        wrapped_reasoning += current_line + "\n"
-                        current_line = word
-                    else:
-                        if current_line:
-                            current_line += " " + word
-                        else:
-                            current_line = word
-                if current_line:
-                    wrapped_reasoning += current_line
-                
-                reasoning_str = wrapped_reasoning
+
+                reasoning_str = _wrap_text(reasoning_str)
 
             table_data.append(
                 [
@@ -108,6 +121,67 @@ def print_trading_output(result: dict) -> None:
             )
         )
 
+        # Surface risk manager constraints and overrides for auditability
+        risk_snapshot = (
+            result.get("analyst_signals", {})
+            .get("risk_management_agent", {})
+            .get(ticker, {})
+        )
+
+        risk_rows: list[list[str]] = []
+        if risk_snapshot:
+            remaining_limit = risk_snapshot.get("remaining_position_limit")
+            if remaining_limit is not None:
+                risk_rows.append(
+                    [
+                        f"{Fore.WHITE}Remaining Limit{Style.RESET_ALL}",
+                        f"{Fore.YELLOW}${remaining_limit:,.0f}{Style.RESET_ALL}",
+                    ]
+                )
+
+            constraint_notes = (
+                risk_snapshot.get("reasoning", {}).get("constraints") or []
+            )
+            if constraint_notes:
+                constraint_lines = []
+                for idx, note in enumerate(constraint_notes, start=1):
+                    wrapped = _wrap_text(str(note))
+                    constraint_lines.append(
+                        f"{idx}. {wrapped.replace('\n', '\n   ')}"
+                    )
+                constraints_text = "\n".join(constraint_lines)
+            else:
+                constraints_text = "None"
+            risk_rows.append(
+                [
+                    f"{Fore.WHITE}Constraint Notes{Style.RESET_ALL}",
+                    f"{Fore.WHITE}{constraints_text}{Style.RESET_ALL}",
+                ]
+            )
+
+            overrides = risk_snapshot.get("overrides") or {}
+            if overrides:
+                override_lines = []
+                for key, value in sorted(overrides.items()):
+                    wrapped_value = _wrap_text(f"{key}: {value}")
+                    override_lines.append(wrapped_value.replace("\n", "\n   "))
+                overrides_text = "\n".join(override_lines)
+            else:
+                overrides_text = "None"
+            risk_rows.append(
+                [
+                    f"{Fore.WHITE}Overrides{Style.RESET_ALL}",
+                    f"{Fore.CYAN}{overrides_text}{Style.RESET_ALL}",
+                ]
+            )
+
+        if risk_rows:
+            print(
+                f"\n{Fore.WHITE}{Style.BRIGHT}RISK CONTROLS:{Style.RESET_ALL} "
+                f"[{Fore.CYAN}{ticker}{Style.RESET_ALL}]"
+            )
+            print(tabulate(risk_rows, tablefmt="grid", colalign=("left", "left")))
+
         # Print Trading Decision Table
         action = decision.get("action", "").upper()
         action_color = {
@@ -120,23 +194,7 @@ def print_trading_output(result: dict) -> None:
 
         # Get reasoning and format it
         reasoning = decision.get("reasoning", "")
-        # Wrap long reasoning text to make it more readable
-        wrapped_reasoning = ""
-        if reasoning:
-            current_line = ""
-            # Use a fixed width of 60 characters to match the table column width
-            max_line_length = 60
-            for word in reasoning.split():
-                if len(current_line) + len(word) + 1 > max_line_length:
-                    wrapped_reasoning += current_line + "\n"
-                    current_line = word
-                else:
-                    if current_line:
-                        current_line += " " + word
-                    else:
-                        current_line = word
-            if current_line:
-                wrapped_reasoning += current_line
+        wrapped_reasoning = _wrap_text(reasoning)
 
         decision_data = [
             ["Action", f"{action_color}{action}{Style.RESET_ALL}"],
@@ -204,24 +262,9 @@ def print_trading_output(result: dict) -> None:
         else:
             # Convert any other type to string
             reasoning_str = str(portfolio_manager_reasoning)
-            
-        # Wrap long reasoning text to make it more readable
-        wrapped_reasoning = ""
-        current_line = ""
-        # Use a fixed width of 60 characters to match the table column width
-        max_line_length = 60
-        for word in reasoning_str.split():
-            if len(current_line) + len(word) + 1 > max_line_length:
-                wrapped_reasoning += current_line + "\n"
-                current_line = word
-            else:
-                if current_line:
-                    current_line += " " + word
-                else:
-                    current_line = word
-        if current_line:
-            wrapped_reasoning += current_line
-            
+
+        wrapped_reasoning = _wrap_text(reasoning_str)
+
         print(f"\n{Fore.WHITE}{Style.BRIGHT}Portfolio Strategy:{Style.RESET_ALL}")
         print(f"{Fore.CYAN}{wrapped_reasoning}{Style.RESET_ALL}")
 
@@ -256,16 +299,25 @@ def print_backtest_results(table_rows: list) -> None:
         print(f"Total Position Value: {Fore.YELLOW}${float(position_str):,.2f}{Style.RESET_ALL}")
         print(f"Total Value: {Fore.WHITE}${float(total_str):,.2f}{Style.RESET_ALL}")
         print(f"Portfolio Return: {latest_summary[10]}")
-        if len(latest_summary) > 14 and latest_summary[14]:
-            print(f"Benchmark Return: {latest_summary[14]}")
+        if len(latest_summary) > 11 and latest_summary[11]:
+            print(f"Turnover Rate: {latest_summary[11]}")
 
         # Display performance metrics if available
-        if latest_summary[11]:  # Sharpe ratio
-            print(f"Sharpe Ratio: {latest_summary[11]}")
-        if latest_summary[12]:  # Sortino ratio
-            print(f"Sortino Ratio: {latest_summary[12]}")
-        if latest_summary[13]:  # Max drawdown
-            print(f"Max Drawdown: {latest_summary[13]}")
+        sharpe_idx = 12
+        sortino_idx = 13
+        info_idx = 14
+        drawdown_idx = 15
+        benchmark_idx = 16
+        if len(latest_summary) > sharpe_idx and latest_summary[sharpe_idx]:
+            print(f"Sharpe Ratio: {latest_summary[sharpe_idx]}")
+        if len(latest_summary) > sortino_idx and latest_summary[sortino_idx]:
+            print(f"Sortino Ratio: {latest_summary[sortino_idx]}")
+        if len(latest_summary) > info_idx and latest_summary[info_idx]:
+            print(f"Information Ratio: {latest_summary[info_idx]}")
+        if len(latest_summary) > drawdown_idx and latest_summary[drawdown_idx]:
+            print(f"Max Drawdown: {latest_summary[drawdown_idx]}")
+        if len(latest_summary) > benchmark_idx and latest_summary[benchmark_idx]:
+            print(f"Benchmark Return: {latest_summary[benchmark_idx]}")
 
     # Add vertical spacing
     print("\n" * 2)
@@ -319,7 +371,9 @@ def format_backtest_row(
     sharpe_ratio: float = None,
     sortino_ratio: float = None,
     max_drawdown: float = None,
+    information_ratio: float | None = None,
     benchmark_return_pct: float | None = None,
+    turnover_rate: float | None = None,
 ) -> list[any]:
     """Format a row for the backtest results table"""
     # Color the action
@@ -337,6 +391,16 @@ def format_backtest_row(
         if benchmark_return_pct is not None:
             bench_color = Fore.GREEN if benchmark_return_pct >= 0 else Fore.RED
             benchmark_str = f"{bench_color}{benchmark_return_pct:+.2f}%{Style.RESET_ALL}"
+        turnover_str = (
+            f"{Fore.MAGENTA}{turnover_rate * 100.0:.2f}%{Style.RESET_ALL}"
+            if turnover_rate is not None
+            else ""
+        )
+        info_ratio_str = (
+            f"{Fore.YELLOW}{information_ratio:.2f}{Style.RESET_ALL}"
+            if information_ratio is not None
+            else ""
+        )
         return [
             date,
             f"{Fore.WHITE}{Style.BRIGHT}PORTFOLIO SUMMARY{Style.RESET_ALL}",
@@ -349,8 +413,10 @@ def format_backtest_row(
             f"{Fore.CYAN}${cash_balance:,.2f}{Style.RESET_ALL}",  # Cash Balance
             f"{Fore.WHITE}${total_value:,.2f}{Style.RESET_ALL}",  # Total Value
             f"{return_color}{return_pct:+.2f}%{Style.RESET_ALL}",  # Return
+            turnover_str,
             f"{Fore.YELLOW}{sharpe_ratio:.2f}{Style.RESET_ALL}" if sharpe_ratio is not None else "",  # Sharpe Ratio
             f"{Fore.YELLOW}{sortino_ratio:.2f}{Style.RESET_ALL}" if sortino_ratio is not None else "",  # Sortino Ratio
+            info_ratio_str,
             f"{Fore.RED}{max_drawdown:.2f}%{Style.RESET_ALL}" if max_drawdown is not None else "",  # Max Drawdown (signed)
             benchmark_str,  # Benchmark (S&P 500)
         ]

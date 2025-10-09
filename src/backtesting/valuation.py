@@ -70,6 +70,8 @@ def compute_portfolio_summary(
     else:
         return_pct = 0.0
 
+    turnover_rate = performance_metrics.get("turnover_rate")
+
     return {
         "total_value": float(total_value),
         "return_pct": float(return_pct),
@@ -78,5 +80,6 @@ def compute_portfolio_summary(
         "sharpe_ratio": performance_metrics.get("sharpe_ratio"),
         "sortino_ratio": performance_metrics.get("sortino_ratio"),
         "max_drawdown": performance_metrics.get("max_drawdown"),
+        "information_ratio": performance_metrics.get("information_ratio"),
+        "turnover_rate": float(turnover_rate) if turnover_rate is not None else None,
     }
-

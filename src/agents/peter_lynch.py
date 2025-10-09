@@ -1,18 +1,21 @@
+import json
+from typing import Any
+
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel
+from typing_extensions import Literal
+
 from src.graph.state import AgentState, show_agent_reasoning
 from src.tools.api import (
+    get_company_news,
+    get_insider_trades,
     get_market_cap,
     search_line_items,
-    get_insider_trades,
-    get_company_news,
 )
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage
-from pydantic import BaseModel
-import json
-from typing_extensions import Literal
-from src.utils.progress import progress
-from src.utils.llm import call_llm
 from src.utils.api_key import get_api_key_from_state
+from src.utils.llm import call_llm
+from src.utils.progress import progress
 
 
 class PeterLynchSignal(BaseModel):
@@ -22,6 +25,102 @@ class PeterLynchSignal(BaseModel):
     signal: Literal["bullish", "bearish", "neutral"]
     confidence: float
     reasoning: str
+
+
+def _compute_confidence(signal: str, total_score: float, max_score: float) -> float:
+    """Translate deterministic scores into a 0–100 confidence band."""
+    # Guard against degenerate inputs
+    neutral_score = 5.0
+    safe_max_score = max(max_score, neutral_score + 1.0)
+
+    signal = signal or "neutral"
+    if signal not in {"bullish", "bearish", "neutral"}:
+        signal = "neutral"
+
+    if signal == "bullish":
+        margin = max(0.0, total_score - neutral_score)
+        scale = max(1.0, safe_max_score - neutral_score)
+        normalized = min(1.0, margin / scale)
+        confidence = 50.0 + normalized * 45.0
+    elif signal == "bearish":
+        margin = max(0.0, neutral_score - total_score)
+        normalized = min(1.0, margin / neutral_score)
+        confidence = 50.0 + normalized * 45.0
+    else:
+        distance = abs(total_score - neutral_score)
+        normalized = max(0.0, 1.0 - min(1.0, distance / neutral_score))
+        confidence = 35.0 + normalized * 25.0
+
+    return max(5.0, min(95.0, confidence))
+
+
+def build_peter_lynch_fallback_signal(
+    ticker: str,
+    analysis_data: dict[str, Any],
+) -> PeterLynchSignal:
+    """Create a deterministic Peter Lynch signal when the LLM is unavailable."""
+
+    total_score = float(analysis_data.get("score", 5.0) or 5.0)
+    max_score = float(analysis_data.get("max_score", 10.0) or 10.0)
+    raw_signal = analysis_data.get("signal")
+    if raw_signal in {"bullish", "bearish", "neutral"}:
+        signal = raw_signal
+    elif total_score >= 7.5:
+        signal = "bullish"
+    elif total_score <= 4.5:
+        signal = "bearish"
+    else:
+        signal = "neutral"
+
+    confidence = _compute_confidence(signal, total_score, max_score)
+
+    component_labels = {
+        "growth_analysis": "Growth",
+        "valuation_analysis": "Valuation",
+        "fundamentals_analysis": "Fundamentals",
+        "sentiment_analysis": "Sentiment",
+        "insider_activity": "Insiders",
+    }
+
+    driver_fragments: list[str] = []
+    for key, label in component_labels.items():
+        component = analysis_data.get(key) or {}
+        score_value = component.get("score")
+        details = component.get("details")
+
+        snippet_parts = []
+        if score_value is not None:
+            snippet_parts.append(f"{score_value:.1f}/10")
+        if details:
+            snippet_parts.append(str(details))
+
+        if snippet_parts:
+            driver_fragments.append(f"{label}: {' - '.join(snippet_parts)}")
+
+    if not driver_fragments:
+        driver_fragments.append("No component data available")
+
+    margin_text = ""
+    if signal == "bullish":
+        margin = total_score - 5.0
+        if margin:
+            margin_text = f" (+{margin:.1f} vs neutral threshold)"
+    elif signal == "bearish":
+        margin = 5.0 - total_score
+        if margin:
+            margin_text = f" (-{margin:.1f} vs neutral threshold)"
+
+    reasoning = (
+        f"Deterministic fallback triggered because the LLM output was unavailable for {ticker}. "
+        f"Composite score {total_score:.1f}/{max_score:.1f} points to a {signal} stance{margin_text}. "
+        f"Drivers: {' | '.join(driver_fragments)}."
+    )
+
+    return PeterLynchSignal(
+        signal=signal,
+        confidence=round(confidence, 2),
+        reasoning=reasoning,
+    )
 
 
 def peter_lynch_agent(state: AgentState, agent_id: str = "peter_lynch_agent"):
@@ -109,16 +208,7 @@ def peter_lynch_agent(state: AgentState, agent_id: str = "peter_lynch_agent"):
 
         max_possible_score = 10.0
 
-        # Map final score to signal
-        if total_score >= 7.5:
-            signal = "bullish"
-        elif total_score <= 4.5:
-            signal = "bearish"
-        else:
-            signal = "neutral"
-
         analysis_data[ticker] = {
-            "signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
             "growth_analysis": growth_analysis,
@@ -492,11 +582,7 @@ def generate_lynch_output(
     prompt = template.invoke({"analysis_data": json.dumps(analysis_data, indent=2), "ticker": ticker})
 
     def create_default_signal():
-        return PeterLynchSignal(
-            signal="neutral",
-            confidence=0.0,
-            reasoning="Error in analysis; defaulting to neutral"
-        )
+        return build_peter_lynch_fallback_signal(ticker, analysis_data)
 
     return call_llm(
         prompt=prompt,

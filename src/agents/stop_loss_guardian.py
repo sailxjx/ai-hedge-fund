@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from langchain_core.messages import HumanMessage
 
+from src.agents.persona_utils import persona_from_observations
 from src.graph.state import AgentState, show_agent_reasoning
 from src.tools.api import get_prices, prices_to_df
 from src.utils.api_key import get_api_key_from_state
@@ -40,6 +41,18 @@ def _calculate_atr(prices_df: pd.DataFrame, period: int = 14) -> pd.Series:
     atr = true_range.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     return atr.bfill()
 
+
+PERSONA_NAME = "Aegis"
+PERSONA_ROLE = "a stop-loss sentinel guarding the book against runaway squeezes"
+PERSONA_BACKSTORY = (
+    "Aegis managed short risk through volatile markets and now interprets stop metrics before ordering covers."
+)
+PERSONA_INSTRUCTIONS = (
+    "Scrutinize loss percentages, ATR bands, and position context before deciding.",
+    "Force covers only when losses clearly breach thresholds; otherwise justify trims.",
+    "Explain the call in first person, highlighting the decisive metrics.",
+)
+ALLOWED_SIGNALS = ["force_exit", "trim_position", "within_tolerance", "data_unavailable", "no_short_position"]
 
 ##### Stop-Loss Guardian Analyst #####
 def stop_loss_guardian_agent(state: AgentState, agent_id: str = "stop_loss_guardian_agent"):
@@ -102,54 +115,46 @@ def stop_loss_guardian_agent(state: AgentState, agent_id: str = "stop_loss_guard
         base_threshold = max(0.03, atr_pct * 1.5)
         escalated_threshold = base_threshold * 1.5
 
-        constraints: dict[str, Any] = {
-            "loss_pct": round(loss_pct, 4),
-            "threshold_pct": round(base_threshold, 4),
-            "atr_pct": round(atr_pct, 4),
+        suggested_actions = {
+            "full_cover_qty": short_shares if loss_pct >= escalated_threshold else 0,
+            "partial_cover_qty": max(1, int(np.ceil(short_shares * 0.5))) if loss_pct >= base_threshold else 0,
+            "thresholds": {
+                "base": base_threshold,
+                "escalated": escalated_threshold,
+            },
         }
 
-        if loss_pct >= escalated_threshold:
-            force_qty = short_shares
-            constraints.update(
-                {
-                    "force_cover": True,
-                    "force_cover_qty": force_qty,
-                    "block_new_shorts": True,
-                    "target_short_shares": 0,
-                }
-            )
-            signal = "force_exit"
-            confidence = 95
-            reasoning = (
-                f"Loss {loss_pct:.2%} exceeds escalated threshold {escalated_threshold:.2%}; cover entire short"
-            )
-        elif loss_pct >= base_threshold:
-            force_qty = max(1, int(np.ceil(short_shares * 0.5)))
-            remaining = max(0, short_shares - force_qty)
-            constraints.update(
-                {
-                    "force_cover": True,
-                    "force_cover_qty": force_qty,
-                    "block_new_shorts": True,
-                    "target_short_shares": remaining,
-                }
-            )
-            signal = "trim_position"
-            confidence = 85
-            reasoning = (
-                f"Loss {loss_pct:.2%} breached stop {base_threshold:.2%}; cover {force_qty} shares"
-            )
-        else:
-            constraints.update({"force_cover": False, "target_short_shares": short_shares})
-            signal = "within_tolerance"
-            confidence = int(max(40, 70 - (loss_pct / base_threshold * 30))) if base_threshold > 0 else 60
-            reasoning = f"Loss {loss_pct:.2%} within stop band {base_threshold:.2%}; monitor"
+        observations = {
+            "ticker": ticker,
+            "short_shares": short_shares,
+            "average_entry": avg_entry,
+            "current_price": current_price,
+            "loss_pct": loss_pct,
+            "atr_pct": atr_pct,
+            "base_threshold": base_threshold,
+            "escalated_threshold": escalated_threshold,
+            "suggested_actions": suggested_actions,
+        }
+
+        decision = persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="within_tolerance",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to within_tolerance after missing persona judgement.",
+        )
 
         position_monitor[ticker] = {
-            "signal": signal,
-            "confidence": int(np.clip(confidence, 0, 100)),
-            "reasoning": reasoning,
-            "constraints": constraints,
+            "signal": decision.signal,
+            "confidence": int(np.clip(decision.confidence, 0, 100)),
+            "reasoning": decision.reasoning,
+            "constraints": decision.constraints or {},
             "metrics": {
                 "current_price": current_price,
                 "avg_entry": avg_entry,
@@ -159,6 +164,7 @@ def stop_loss_guardian_agent(state: AgentState, agent_id: str = "stop_loss_guard
                 "escalated_threshold": escalated_threshold,
                 "atr_pct": atr_pct,
             },
+            "meta": {"observations": observations},
         }
 
     message = HumanMessage(content=json.dumps(position_monitor), name=agent_id)

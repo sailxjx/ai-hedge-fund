@@ -82,15 +82,7 @@ def mohnish_pabrai_agent(state: AgentState, agent_id: str = "mohnish_pabrai_agen
         )
         max_score = 10
 
-        if total_score >= 7.5:
-            signal = "bullish"
-        elif total_score <= 4.0:
-            signal = "bearish"
-        else:
-            signal = "neutral"
-
         analysis_data[ticker] = {
-            "signal": signal,
             "score": total_score,
             "max_score": max_score,
             "downside_protection": downside,

@@ -7,7 +7,7 @@ from colorama import Fore, Style
 
 from src.main import run_hedge_fund, strip_ansi
 from src.backtesting.engine import BacktestEngine
-from src.backtesting.types import PerformanceMetrics
+from src.backtesting.data_types import PerformanceMetrics
 from src.cli.input import (
     parse_cli_inputs,
 )
@@ -85,6 +85,8 @@ if __name__ == "__main__":
         model_provider=inputs.model_provider,
         selected_analysts=inputs.selected_analysts,
         initial_margin_requirement=inputs.margin_requirement,
+        portfolio_seed=inputs.portfolio_seed,
+        initial_long_pct=inputs.initial_long_pct,
     )
 
     performance_metrics: PerformanceMetrics | None = None

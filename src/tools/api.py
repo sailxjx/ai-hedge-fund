@@ -1,4 +1,5 @@
 import datetime
+import io
 import os
 import pandas as pd
 import requests
@@ -107,6 +108,71 @@ def _make_api_request(
         # Return the response (whether success, other errors, or final 429)
         return response
 
+STOOQ_SYMBOL_MAP = {
+    "^GSPC": "^spx",
+    "^SPX": "^spx",
+    "SPX": "^spx",
+    "SP500": "^spx",
+    "S&P500": "^spx",
+    "SPY": "spy.us",
+}
+
+
+def _fetch_stooq_prices(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    cache_key: str,
+) -> list[Price] | None:
+    """Fetch daily prices from Stooq as an unauthenticated fallback."""
+
+    symbol = STOOQ_SYMBOL_MAP.get(ticker.upper()) or STOOQ_SYMBOL_MAP.get(ticker)
+    if not symbol:
+        return None
+
+    url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
+    try:
+        response = requests.get(url, timeout=DEFAULT_API_REQUEST_TIMEOUT_SECONDS)
+        response.raise_for_status()
+    except requests_exceptions.RequestException:
+        return []
+
+    csv_buffer = io.StringIO(response.text)
+    try:
+        df = pd.read_csv(csv_buffer)
+    except pd.errors.EmptyDataError:
+        return []
+
+    if df.empty or "Date" not in df:
+        return []
+
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])
+
+    start = pd.to_datetime(start_date)
+    end = pd.to_datetime(end_date)
+    df = df[(df["Date"] >= start) & (df["Date"] <= end)].sort_values("Date")
+
+    prices: list[Price] = []
+    for _, row in df.iterrows():
+        try:
+            price = Price(
+                open=float(row["Open"]),
+                close=float(row["Close"]),
+                high=float(row["High"]),
+                low=float(row["Low"]),
+                volume=int(row.get("Volume", 0) or 0),
+                time=f"{row['Date'].strftime('%Y-%m-%d')}T00:00:00Z",
+            )
+            prices.append(price)
+        except (TypeError, ValueError):
+            continue
+
+    if prices:
+        _cache.set_prices(cache_key, [p.model_dump() for p in prices])
+
+    return prices
+
 
 def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None) -> list[Price]:
     """Fetch price data from cache or API."""
@@ -136,6 +202,9 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
         )
         return []
     if response.status_code != 200:
+        fallback_prices = _fetch_stooq_prices(ticker, start_date, end_date, cache_key)
+        if fallback_prices is not None:
+            return fallback_prices
         raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
 
     # Parse response with Pydantic model
@@ -143,6 +212,9 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
     prices = price_response.prices
 
     if not prices:
+        fallback_prices = _fetch_stooq_prices(ticker, start_date, end_date, cache_key)
+        if fallback_prices is not None:
+            return fallback_prices
         return []
 
     # Cache the results using the comprehensive cache key
@@ -378,6 +450,12 @@ def get_company_news(
             print(
                 f"Skipping company news for {ticker} because the request timed out after {COMPANY_NEWS_TIMEOUT_SECONDS} seconds."
             )
+            return []
+        if response.status_code == 404:
+            print(
+                f"Company news unavailable for {ticker} between {start_date or 'beginning'} and {current_end_date}; proceeding without news coverage."
+            )
+            _cache.set_company_news(cache_key, [])
             return []
         if response.status_code != 200:
             raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")

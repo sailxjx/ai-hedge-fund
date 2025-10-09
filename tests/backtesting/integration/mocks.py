@@ -1,4 +1,4 @@
-from src.backtesting.types import AgentOutput
+from src.backtesting.data_types import AgentOutput
 
 
 class MockConfigurableAgent:

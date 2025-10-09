@@ -1,13 +1,16 @@
 import json
+import os
+from datetime import datetime
+from typing import Any
+
 from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
+from typing_extensions import Literal
 
 from src.graph.state import AgentState, show_agent_reasoning
-from pydantic import BaseModel, Field
-from typing import Any
-from typing_extensions import Literal
-from src.utils.progress import progress
 from src.utils.llm import call_llm
+from src.utils.progress import progress
 
 
 class PortfolioDecision(BaseModel):
@@ -169,14 +172,29 @@ def compute_allowed_actions(
                 actions.pop("short", None)
 
         target_short = override.get("target_short_shares")
-        if target_short is not None and short_shares > 0:
+        if target_short is not None:
             try:
                 target_short_int = max(0, int(target_short))
             except (TypeError, ValueError):
                 target_short_int = short_shares
-            desired_cover = max(0, short_shares - target_short_int)
-            if desired_cover > 0:
-                actions["cover"] = max(actions.get("cover", 0), desired_cover)
+
+            if short_shares > target_short_int:
+                desired_cover = max(0, short_shares - target_short_int)
+                if desired_cover > 0:
+                    actions["cover"] = min(actions.get("cover", 0), desired_cover)
+            else:
+                actions["cover"] = 0
+
+            if "short" in actions:
+                additional_capacity = max(0, target_short_int - short_shares)
+                if additional_capacity <= 0:
+                    actions.pop("short", None)
+                else:
+                    capped_short = min(actions["short"], additional_capacity)
+                    if capped_short > 0:
+                        actions["short"] = capped_short
+                    else:
+                        actions.pop("short", None)
 
         force_cover_qty = override.get("force_cover_qty")
         if short_shares > 0 and isinstance(force_cover_qty, (int, float)):
@@ -276,6 +294,22 @@ def generate_trading_decision(
                     )
                     continue
 
+        target_short = override.get("target_short_shares")
+        if target_short is not None and aa.get("short"):
+            try:
+                target_short_int = max(0, int(target_short))
+            except (TypeError, ValueError):
+                target_short_int = short_shares
+            desired_short = max(0, target_short_int - short_shares)
+            if desired_short > 0:
+                qty = min(desired_short, aa["short"])
+                if qty > 0:
+                    reason = override.get("force_short_reason") or "Risk manager short target"
+                    prefilled_decisions[t] = PortfolioDecision(
+                        action="short", quantity=qty, confidence=100.0, reasoning=reason[:100]
+                    )
+                    continue
+
         # If only 'hold' key exists, there is no trade possible
         if set(aa.keys()) == {"hold"}:
             prefilled_decisions[t] = PortfolioDecision(
@@ -297,6 +331,7 @@ def generate_trading_decision(
             (
                 "system",
                 "You are a portfolio manager.\n"
+                "Ultimate goal: compound risk-adjusted returns while fully respecting risk guardrails and capital preservation.\n"
                 "Inputs per ticker: analyst signals and allowed actions with max qty (already validated).\n"
                 "Pick one allowed action per ticker and a quantity ≤ the max. "
                 "Keep reasoning very concise (max 100 chars). No cash or margin math. Return JSON only."
@@ -342,4 +377,37 @@ def generate_trading_decision(
     # Merge prefilled holds with LLM results
     merged = dict(prefilled_decisions)
     merged.update(llm_out.decisions)
+
+    debug_path = os.getenv("PORTFOLIO_MANAGER_DEBUG_LOG")
+    if debug_path:
+        try:
+            portfolio_dict = portfolio if isinstance(portfolio, dict) else {}
+            positions = portfolio_dict.get("positions", {}) if isinstance(portfolio_dict, dict) else {}
+            debug_payload = {
+                "logged_at": datetime.utcnow().isoformat(),
+                "agent_id": agent_id,
+                "start_date": state.get("data", {}).get("start_date"),
+                "end_date": state.get("data", {}).get("end_date"),
+                "tickers": tickers,
+                "current_prices": current_prices,
+                "max_shares": max_shares,
+                "portfolio": {
+                    "cash": float(portfolio_dict.get("cash", 0.0)) if portfolio_dict else None,
+                    "equity": portfolio_dict.get("equity") if portfolio_dict else None,
+                    "margin_requirement": portfolio_dict.get("margin_requirement") if portfolio_dict else None,
+                    "margin_used": portfolio_dict.get("margin_used") if portfolio_dict else None,
+                    "positions": positions,
+                },
+                "overrides": overrides,
+                "allowed_actions": allowed_actions_full,
+                "prefilled": {ticker: decision.model_dump() for ticker, decision in prefilled_decisions.items()},
+                "decisions": {ticker: decision.model_dump() for ticker, decision in merged.items()},
+            }
+            with open(debug_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(debug_payload, default=str))
+                handle.write("\n")
+        except Exception:
+            # Debug logging must not interfere with trading execution.
+            pass
+
     return PortfolioManagerOutput(decisions=merged)

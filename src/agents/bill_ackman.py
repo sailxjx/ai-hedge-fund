@@ -70,31 +70,21 @@ def bill_ackman_agent(state: AgentState, agent_id: str = "bill_ackman_agent"):
         progress.update_status(agent_id, ticker, "Calculating intrinsic value & margin of safety")
         valuation_analysis = analyze_valuation(financial_line_items, market_cap)
         
-        # Combine partial scores or signals
         total_score = (
             quality_analysis["score"]
             + balance_sheet_analysis["score"]
             + activism_analysis["score"]
             + valuation_analysis["score"]
         )
-        max_possible_score = 20  # Adjust weighting as desired (5 from each sub-analysis, for instance)
-        
-        # Generate a simple buy/hold/sell (bullish/neutral/bearish) signal
-        if total_score >= 0.7 * max_possible_score:
-            signal = "bullish"
-        elif total_score <= 0.3 * max_possible_score:
-            signal = "bearish"
-        else:
-            signal = "neutral"
+        max_possible_score = 20
         
         analysis_data[ticker] = {
-            "signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
             "quality_analysis": quality_analysis,
             "balance_sheet_analysis": balance_sheet_analysis,
             "activism_analysis": activism_analysis,
-            "valuation_analysis": valuation_analysis
+            "valuation_analysis": valuation_analysis,
         }
         
         progress.update_status(agent_id, ticker, "Generating Bill Ackman analysis")
