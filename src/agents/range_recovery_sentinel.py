@@ -9,10 +9,14 @@ import numpy as np
 import pandas as pd
 from langchain_core.messages import HumanMessage
 
-from src.agents.persona_utils import persona_from_observations
+from src.agents.persona_utils import (
+    async_persona_from_observations,
+    persona_from_observations,
+)
 from src.graph.state import AgentState, show_agent_reasoning
-from src.tools.api import get_prices, prices_to_df
+from src.tools.api import get_prices, get_prices_async, prices_to_df, prices_to_df_async
 from src.utils.api_key import get_api_key_from_state
+from src.utils.async_state import update_analyst_signals_async
 from src.utils.progress import progress
 
 EPSILON = 1e-9
@@ -262,4 +266,78 @@ def range_recovery_sentinel_agent(
     }
 
 
-__all__ = ["range_recovery_sentinel_agent"]
+async def range_recovery_sentinel_agent_async(
+    state: AgentState, agent_id: str = "range_recovery_sentinel_agent"
+):
+    """Async range recovery sentinel to support persona parallelism."""
+
+    data = state.get("data", {})
+    tickers = data.get("tickers", [])
+    start_date = data.get("start_date")
+    end_date = data.get("end_date")
+    portfolio = data.get("portfolio", {}) or {}
+    positions = portfolio.get("positions", {}) or {}
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+
+    sentinel_signals: dict[str, dict[str, Any]] = {}
+
+    for ticker in tickers:
+        progress.update_status(agent_id, ticker, "Evaluating range recovery")
+        prices = await get_prices_async(
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            api_key=api_key,
+        )
+
+        current_position = positions.get(ticker, {}) or {}
+        existing_short = _safe_int(current_position.get("short"))
+        df = await prices_to_df_async(prices) if prices else None
+        observations, features = _prepare_observation(df=df, ticker=ticker, existing_short=existing_short)
+        progress.update_status(agent_id, ticker, f"Observation ready ({observations['data_status']})")
+
+        decision = await async_persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="monitor",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to monitor after observation-only fallback.",
+        )
+
+        metrics = dict(observations["range_features"])
+        metrics["existing_short_shares"] = existing_short
+
+        confidence = int(max(0, min(round(decision.confidence), 100)))
+        payload: dict[str, Any] = {
+            "signal": decision.signal,
+            "confidence": confidence,
+            "reasoning": decision.reasoning,
+            "metrics": metrics,
+            "constraints": decision.constraints or {},
+            "meta": {"observations": observations},
+        }
+
+        sentinel_signals[ticker] = payload
+        progress.update_status(agent_id, ticker, f"{payload['signal'].upper()} @ {confidence}/100")
+
+    message = HumanMessage(content=json.dumps(sentinel_signals), name=agent_id)
+
+    if state.get("metadata", {}).get("show_reasoning"):
+        show_agent_reasoning(sentinel_signals, "Range Recovery Sentinel")
+
+    await update_analyst_signals_async(state, agent_id, sentinel_signals)
+    progress.update_status(agent_id, None, "Done")
+
+    return {
+        "messages": state.get("messages", []) + [message],
+        "data": state["data"],
+    }
+
+
+__all__ = ["range_recovery_sentinel_agent", "range_recovery_sentinel_agent_async"]

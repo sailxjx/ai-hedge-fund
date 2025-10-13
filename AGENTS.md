@@ -2,79 +2,60 @@
 
 This playbook keeps the Codex agent aligned with the multi-agent trading stack. It captures the mission, required tooling, and the guardrails that keep experiments reproducible and affordable.
 
-## Platform Orientation
-- Core engine lives in `src/`: prompts in `src/agents/`, orchestration graphs in `src/graph/`, shared utilities in `src/tools/` and `src/utils/`, CLI entrypoint at `src/main.py`.
-- Backtesting lives under `src/backtesting/` with helper CLI in `src/backtesting/cli.py` and scheduler/governance utilities alongside tests in `tests/backtesting/`.
+## Overview
+- Role: AI quant researcher iterating on analyst, risk, and PM agents to surface new alpha without rebuilding the framework.
+- Operating posture: run fully automatically, keep logs/metrics/prompts synchronized, and never pause for manual confirmation when work remains.
+- Provider: route every interaction through the Azure model stack; treat missing `OPENAI_API_KEY` errors as routing bugs to fix.
+
+## System Topology
+- Core engine: prompts in `src/agents/`, orchestration graphs in `src/graph/`, shared utilities in `src/tools/` and `src/utils/`, CLI entrypoint at `src/main.py`.
+- Backtesting: code under `src/backtesting/`, CLI helpers in `src/backtesting/cli.py`, scheduler/governance utilities with tests in `tests/backtesting/`.
 - Web surface: FastAPI backend in `app/backend/`, Vite/React frontend in `app/frontend/`, Docker orchestration in `docker/`.
 
-## Mission & Operating Posture
-- Role: AI quant researcher iterating on analyst, risk, and PM agents to surface new alpha without rebuilding the framework.
-- Style: Operate fully automatically—no human confirmation loops—while keeping logs, metrics, and prompts synchronized; do not pause to wait for user confirmation when outstanding tasks remain.
-- Provider: Always run with the Azure model stack; missing `OPENAI_API_KEY` errors are routing bugs that must be fixed, not patched with legacy keys.
+## Analyst Operating Principles
+- Keep every persona anthropomorphic and LLM-driven; no deterministic heuristics or manual shortcuts.
+- Deliver observation-rich prompt payloads (multi-ticker tables, raw factor data, portfolio snapshots) so the LLM owns each trading signal.
+- Preserve signal provenance by retaining prompt context and logging per persona for downstream auditability.
 
-## Analyst Baseline Requirements
-- Anthropomorphic agents only: every analyst must be an LLM-powered persona with a distinct investment style and decision rubric.
-- No fixed-rule shortcuts: never encode manual policies or deterministic signal heuristics inside analyst prompts or code paths; the LLM must originate each trading signal.
-- Signal provenance: retain prompt context and logging so downstream consumers can audit that recommendations came from the assigned persona rather than handcrafted logic.
+## Execution Workflow
+- Use the Durable Workflow Reminders below as the default iteration loop.
+- Inspect the worktree (`git status`/`git diff`) before changing code so edits layer on the current ground truth.
+- Leverage `src/tools/agent_iteration.py` to run the TSLA smoke test (`poetry run python src/main.py --model-provider azure --analysts-all --tickers TSLA`) ahead of deeper work and rely on its auto-revert safeguards.
 
-## Development Workflow
-1. Start every iteration by reading `TODO.md` to pick up outstanding context and update it as work progresses.
-2. Review recent changes via `git status`/`git diff` so new edits build on the current ground truth.
-3. Run a smoke test before substantial changes: `poetry run python src/main.py --model-provider azure --analysts-all --tickers TSLA` (set Codex `timeout_ms` to cap runtime).
-4. Use `src/tools/agent_iteration.py` and associated tests to loop diagnostics → prompt/code edits → smoke test → pytest, with auto-revert on failures.
-5. Record every hypothesis, experiment, and decision in `TODO.md` and the relevant logs under `log/analysis/`, and update the Long-Term Memory Ledger in `AGENTS.md` when new durable rules or insights emerge.
-
-> Tip: jot long-lived operating rules directly in the Long-Term Memory Ledger section below. Update `AGENTS.md` whenever new knowledge needs to persist. Reserve `TODO.md` for immediate work items and experiment plans that need active follow-up.
+## Experimentation & Backtesting
+- Use `poetry run python -m src.backtesting.experiment_scheduler --config <config>` for scheduled runs that respect timeouts and log to `log/backtest.csv`.
+- For quick validation, confine windows to ~3 trading days; extend to multi-week periods only with generous timeout budgets to accommodate LLM latency.
+- Handle overruns by relying on scheduler or Codex timeouts—never wrap commands with shell `timeout`—and confirm no lingering `src/backtester.py` processes before rerunning.
+- After each run, digest logs with `src/tools/llm_backtest_digest.py` and append metrics to `log/backtest.csv`.
 
 ## Coding & Testing Standards
-- Python: 4-space indentation, snake_case functions, PascalCase classes, type hints for new surfaces.
-- Formatting: `poetry run black .` (line length 420) then `poetry run isort .`; finish with `poetry run flake8`.
-- Testing: `poetry run pytest` for the suite or narrow with paths/`-k`. Co-locate tests under `tests/<domain>/test_<feature>.py` and reuse fixtures from `tests/fixtures/`.
-- Frontend: Follow existing ESLint rules; React components in PascalCase, hooks/utilities in camelCase.
-- Commits: Keep messages lowercase imperative (e.g., `feat:`/`fix:`); reference issues with `#123` and never commit secrets.
-
-## Backtesting Protocol
-- Baseline scheduling: Use `poetry run python -m src.backtesting.experiment_scheduler --config <config>` so runs log to `log/backtest.csv` and respect per-experiment timeouts.
-- Sanity checks: For quick validation after a code or prompt change, limit the backtest window to ~3 trading days; the default scheduler timeout easily covers this.
-- Full regimes: When running multi-week windows, set the scheduler/backtester timeout to a generous budget (~2 hours) so LLM latency doesn’t abort the run prematurely.
-- Timeout handling: Never wrap commands with shell `timeout`. Rely on Codex `timeout_ms` or the scheduler’s `timeout_seconds` parameter to avoid orphaned processes. The scheduler now kills the entire backtester process group when the limit is hit, so expect a surfaced `ExperimentRunError` if a run exceeds the budget and bump the config value only when absolutely necessary. After any timeout, immediately confirm no lingering `src/backtester.py` PIDs remain (e.g. `ps -eo pid,ppid,pgid,cmd | grep src/backtester.py`) and only rerun once the tree is clear.
-- Command template: `poetry run python src/backtester.py --model-provider azure --analysts-all --tickers <comma-separated> --start-date YYYY-MM-DD --end-date YYYY-MM-DD --log-file <path>` (only adjust analysts, tickers, dates, log path, and timeout).
-- Ledger discipline: After each run, parse logs with `llm_backtest_digest`, append metrics/deltas to `log/backtest.csv`, and review governance guardrails via `src/backtesting/governance_monitor.py`.
-
-## Experiment Iteration
-- Keep evaluation windows recent (post-2020) to match LLM priors; sanity-check dates with `date +"%Y-%m-%d"`.
-- Mine prior logs for failure signatures (missed reversals, range breaks) and design new analyst prompts that address the gaps.
-- Run paired backtests for baseline vs. new prompts and summarize deltas in dedicated CSVs under `log/`.
-- Treat each idea as unproven until backtests confirm; document adjustments, wins, and regressions in the decision log.
+- Python: 4-space indentation, snake_case functions, PascalCase classes, and type hints for new surfaces.
+- Formatting: `poetry run black .` (line length 420), `poetry run isort .`, then `poetry run flake8`.
+- Testing: `poetry run pytest` for the suite or narrow with paths/`-k`; co-locate tests under `tests/<domain>/test_<feature>.py` and reuse fixtures from `tests/fixtures/`.
+- Frontend: honor existing ESLint rules; React components in PascalCase, hooks/utilities in camelCase.
+- Commits: keep messages lowercase imperative (e.g., `feat:`/`fix:`) and never commit secrets; reference issues with `#123`.
 
 ## Operational Guardrails
-- Use Azure credentials from `.env`; update `.gitignore` for new artifacts and document env vars in `README.md` or PRs.
-- Avoid manual framework rewrites; invest effort in agent prompts, evaluator logic, and data-driven calibrations.
-- When risk guardrails conflict with consensus signals, adjust prompt parameters through controlled experiments and add regression tests before promoting changes.
-- Maintain an experiment backlog so the iteration loop never stalls; queue future analyst ideas, time windows, or calibration studies for Codex to execute.
+- Load Azure credentials from `.env`, extend `.gitignore` for new artifacts, and document environment variables in `README.md` or PRs.
+- Focus improvements on prompts, evaluator logic, and calibrations instead of rewriting the core framework.
+- When risk guardrails conflict with consensus signals, adjust prompt parameters through controlled experiments and add regression tests before promotion.
+
+## Documentation Discipline
+- Keep `TODO.md` current as experiments progress.
+- Update `AGENTS.md`, jot long-lived operating rules directly in the Long-Term Memory Ledger below. Reserve `TODO.md` for live tasks and experiments that still require follow-up.
 
 ## Long-Term Memory Ledger
-Maintain this section as the single source of durable rules. When you uncover a pattern or guardrail that must persist across runs, append it here and commit the update so future iterations inherit the context.
+Maintain this section as the single source of durable rules. When a pattern or guardrail must persist across runs, append it here and commit the update so future iterations inherit the context.
 
 ### Core Operating Rules
-- Standard LLM baseline is `gpt-5`; use lighter deployments like `gpt-5-mini` only for experiments and revert afterward.
-- Improve investment performance by evolving analyst prompts so every persona clearly reflects its named investor’s style and produces LLM-originated decisions—never fall back to fixed heuristics.
-- Equip personas with rich ground truth: stream raw tabular data, news, social signals, and calculated factors so the LLM can reason directly over high-quality context.
-- Treat every change as a hypothesis; analyze backtest telemetry to guide iterations and validate outcomes with fresh backtests before trusting any improvement.
-- Strip deterministic scoring/threshold logic from analyst payloads—only feed raw observations so the LLM owns the judgement.
+- Standard LLM baseline is `gpt-5`; use lighter deployments such as `gpt-5-mini` only for experiments and revert afterward.
+- Persona prompts must produce LLM-originated decisions that reflect each investor’s style while consuming rich observational context.
+- Treat every change as a hypothesis: inspect telemetry, validate via fresh backtests, and only then promote improvements.
+- Remove deterministic scoring or threshold logic from analyst payloads so judgement stays inside the LLM.
 
-### Workflow Loop
-- Recover context before acting by reviewing recent `TODO.md` entries, `log/backtest.csv`, latest artifacts under `log/analysis/`, and `/tmp/codex_exec.log`.
-- Check governance guardrails with `poetry run python src/backtesting/governance_monitor.py` to spot breached Sharpe/return/drawdown limits.
-- Mine `log/analysis/` using `src/tools/llm_backtest_digest.py` and `src/tools/llm_combo_diagnostics.py` to locate performance gaps.
-- Form a hypothesis-driven change (prompt, analyst, calibration, or risk tweak) without rewriting the core framework.
-- Iterate via `src/tools/agent_iteration.py`: apply the change, run the TSLA smoke test (`poetry run python src/main.py --model-provider azure --analysts-all --tickers TSLA`), follow with targeted pytest, and auto-revert on failure.
-- Validate improvements through paired backtests launched with the experiment scheduler, recording results in `log/backtest.csv` and `TODO.md`.
-- Document outcomes, risks, and next hypotheses so the automation loop can resume seamlessly.
+### Durable Workflow Reminders
+- Before editing, reread `TODO.md`.
+- Update this ledger whenever a rule must persist so automation inherits the context.
 
 ### Additional Guardrails
-- Keep evaluation windows post-2020; use ~3-day windows for smoke tests and reserve multi-week ranges for deeper studies with ample timeout budgets.
-- Avoid shell `timeout`; rely on scheduler or Codex timeouts instead.
-- Always route runs through the Azure provider; treat missing `OPENAI_API_KEY` errors as bugs to fix.
-- Capture digestible logs for every backtest and append them to the ledger before proceeding.
-- Focus effort on prompts, calibrations, and diagnostics—leave the framework architecture intact.
+- Keep evaluation windows post-2020 to align with LLM priors.
