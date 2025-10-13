@@ -18,16 +18,14 @@ from typing import Iterable, Mapping, Sequence
 from src.utils.analysts import ANALYST_CONFIG
 
 try:  # pragma: no cover - optional imports for supplemental agents
-    from src.agents.risk_manager import risk_management_agent  # type: ignore
     from src.agents.portfolio_manager import portfolio_management_agent  # type: ignore
+    from src.agents.risk_manager import risk_management_agent  # type: ignore
 except Exception:  # pragma: no cover - keep CLI usable without optional deps
     risk_management_agent = None  # type: ignore
     portfolio_management_agent = None  # type: ignore
 
 
-DEFAULT_SMOKE_COMMAND = (
-    "poetry run python src/main.py --model-provider azure --analysts-all --tickers TSLA"
-)
+DEFAULT_SMOKE_COMMAND = "poetry run python src/main.py --model-provider azure --analysts-all --tickers TSLA"
 DEFAULT_LOG_PATH = Path("log/analysis/agent_iteration_log.jsonl")
 DEFAULT_DIAGNOSTICS = Path("log/analysis/latest_llm_combo_diagnostics.json")
 
@@ -173,26 +171,16 @@ def _default_recommendation(issue: str, payload: Mapping[str, object], agents: I
     if issue == "sentinel_disagreements":
         guards = ", ".join(str(v) for v in payload.get("guardrails", [])) or agent_names
         other = ", ".join(str(v) for v in payload.get("other_direction", [])) or agent_names
-        return (
-            f"Review guardrail prompts for {guards} so they're compatible with directional signals from {other}; "
-            "consider tempering hard blocks or introducing conditional thresholds."
-        )
+        return f"Review guardrail prompts for {guards} so they're compatible with directional signals from {other}; " "consider tempering hard blocks or introducing conditional thresholds."
     if issue == "risk_gating_bottlenecks":
         overrides = payload.get("overrides")
         override_summary = json.dumps(overrides, sort_keys=True) if isinstance(overrides, dict) else "current overrides"
-        return (
-            f"Relax risk overrides {override_summary} or retune {agent_names} prompts to restore short capacity "
-            "once directional evidence turns."
-        )
+        return f"Relax risk overrides {override_summary} or retune {agent_names} prompts to restore short capacity " "once directional evidence turns."
     if issue == "bias_conflicts":
-        return (
-            f"Harmonise valuation vs. momentum language across {agent_names} prompts; clarify tie-breaks to avoid persistent splits."
-        )
+        return f"Harmonise valuation vs. momentum language across {agent_names} prompts; clarify tie-breaks to avoid persistent splits."
     if issue == "hedge_conflicts":
         majority = payload.get("sentinel_majority", "sentinel cohorts")
-        return (
-            f"Align portfolio decisions with {majority}; adjust {agent_names} prompts or risk rules so final actions respect sentinel consensus."
-        )
+        return f"Align portfolio decisions with {majority}; adjust {agent_names} prompts or risk rules so final actions respect sentinel consensus."
     description = payload.get("description") or issue.replace("_", " ")
     return f"Investigate {description} and adjust {agent_names} prompts accordingly."
 

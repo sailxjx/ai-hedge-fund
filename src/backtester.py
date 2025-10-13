@@ -5,12 +5,11 @@ from pathlib import Path
 
 from colorama import Fore, Style
 
-from src.main import run_hedge_fund, strip_ansi
-from src.backtesting.engine import BacktestEngine
 from src.backtesting.data_types import PerformanceMetrics
-from src.cli.input import (
-    parse_cli_inputs,
-)
+from src.backtesting.engine import BacktestEngine
+from src.cli.input import parse_cli_inputs
+from src.main import run_hedge_fund, run_hedge_fund_async, strip_ansi
+from src.utils.runtime import async_personas_enabled
 
 
 class _StdoutTee(io.TextIOBase):
@@ -43,24 +42,24 @@ def run_backtest(backtester: BacktestEngine) -> PerformanceMetrics | None:
         return performance_metrics
     except KeyboardInterrupt:
         print(f"\n\n{Fore.YELLOW}Backtest interrupted by user.{Style.RESET_ALL}")
-        
+
         # Try to show any partial results that were computed
         try:
             portfolio_values = backtester.get_portfolio_values()
             if len(portfolio_values) > 1:
                 print(f"{Fore.GREEN}Partial results available.{Style.RESET_ALL}")
-                
+
                 # Show basic summary from the available portfolio values
                 first_value = portfolio_values[0]["Portfolio Value"]
                 last_value = portfolio_values[-1]["Portfolio Value"]
                 total_return = ((last_value - first_value) / first_value) * 100
-                
+
                 print(f"{Fore.CYAN}Initial Portfolio Value: ${first_value:,.2f}{Style.RESET_ALL}")
                 print(f"{Fore.CYAN}Final Portfolio Value: ${last_value:,.2f}{Style.RESET_ALL}")
                 print(f"{Fore.CYAN}Total Return: {total_return:+.2f}%{Style.RESET_ALL}")
         except Exception as e:
             print(f"{Fore.RED}Could not generate partial results: {str(e)}{Style.RESET_ALL}")
-        
+
         sys.exit(0)
 
 
@@ -75,8 +74,9 @@ if __name__ == "__main__":
     )
 
     # Create and run the backtester
+    agent_callable = run_hedge_fund_async if async_personas_enabled() else run_hedge_fund
     backtester = BacktestEngine(
-        agent=run_hedge_fund,
+        agent=agent_callable,
         tickers=inputs.tickers,
         start_date=inputs.start_date,
         end_date=inputs.end_date,

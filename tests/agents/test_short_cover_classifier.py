@@ -17,12 +17,24 @@ def _stub_short_cover_persona(monkeypatch):
     from src.agents import short_cover_classifier as module
 
     def _fake_persona_decision(state, agent_id, context):
-        recommendation = context["model_recommendation"]
+        model_reference = context.get("model_reference") or {}
+        signal = model_reference.get("signal", "neutral")
+        confidence = model_reference.get("confidence", 0.0)
+        reasoning = model_reference.get("reasoning", "")
+        constraints = model_reference.get("constraints", {})
+        if not signal:
+            recommendation = context.get("model_recommendation") or {}
+            signal = recommendation.get("signal", "neutral")
+            confidence = recommendation.get("confidence", confidence)
+            reasoning = recommendation.get("reasoning", reasoning)
+            constraints = recommendation.get("constraints", constraints)
+        if not isinstance(constraints, dict):
+            constraints = {}
         return module.ShortCoverDecision(
-            signal=recommendation["signal"],
-            confidence=float(recommendation["confidence"]),
-            reasoning=recommendation["reasoning"],
-            constraints=recommendation.get("constraints") or {},
+            signal=str(signal),
+            confidence=float(confidence),
+            reasoning=str(reasoning),
+            constraints=constraints,
         )
 
     monkeypatch.setattr(module, "_request_llm_decision", _fake_persona_decision)
@@ -1009,10 +1021,12 @@ def test_precision_improvement_discount_enables_soft_trigger(monkeypatch):
         ),
     )
 
-    train_probs = np.concatenate([
-        np.linspace(0.13, 0.17, len(features) - 6),
-        np.array([0.18, 0.182, 0.184, 0.187, 0.19]),
-    ])
+    train_probs = np.concatenate(
+        [
+            np.linspace(0.13, 0.17, len(features) - 6),
+            np.array([0.18, 0.182, 0.184, 0.187, 0.19]),
+        ]
+    )
 
     def _sigmoid_stub(values):
         values = np.asarray(values)
@@ -1104,10 +1118,12 @@ def test_precision_improvement_discount_trend_damping(monkeypatch):
         ),
     )
 
-    train_probs = np.concatenate([
-        np.linspace(0.13, 0.17, len(base_features) - 6),
-        np.array([0.18, 0.182, 0.184, 0.187, 0.19]),
-    ])
+    train_probs = np.concatenate(
+        [
+            np.linspace(0.13, 0.17, len(base_features) - 6),
+            np.array([0.18, 0.182, 0.184, 0.187, 0.19]),
+        ]
+    )
 
     def _sigmoid_stub(values):
         values = np.asarray(values)
@@ -1160,6 +1176,7 @@ def test_precision_improvement_discount_trend_damping(monkeypatch):
     )
     assert neutral_metrics["precision_improvement_discount_factor"] == pytest.approx(1.0)
     assert neutral_metrics["precision_trend_strength"] == pytest.approx(0.0)
+
 
 def test_boost_guidance_unblocks_new_shorts(monkeypatch):
     from src.agents import short_cover_classifier as module
@@ -1225,7 +1242,6 @@ def test_boost_guidance_unblocks_new_shorts(monkeypatch):
     assert metrics["probability_boost"] < metrics["probability_boost_raw"]
     assert metrics["boost_driven_squeeze"] is False
     assert metrics["boost_driven_soft"] is False
-
 
 
 def test_classifier_returns_neutral_on_empty_dataset(monkeypatch):

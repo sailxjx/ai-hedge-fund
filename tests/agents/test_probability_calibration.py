@@ -104,10 +104,11 @@ def test_mean_reversion_uses_calibration(tmp_path, monkeypatch):
     calibration.reset_probability_calibration_cache()
 
     price_series = _build_prices(140, drift=1.0)
-    monkeypatch.setattr(
-        "src.agents.stat_mean_reversion.get_prices",
-        lambda *_, **__: price_series,
-    )
+
+    async def fake_get_prices_async(*_, **__):
+        return price_series
+
+    monkeypatch.setattr("src.agents.stat_mean_reversion.get_prices_async", fake_get_prices_async)
 
     state = _base_state()
     stat_mean_reversion_agent(state)

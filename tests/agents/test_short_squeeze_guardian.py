@@ -50,13 +50,36 @@ def _base_state(short_shares: int = 0):
     }
 
 
+def _persona_stub_factory(signal: str, confidence: float, constraints: dict | None = None):
+    captured: dict[str, dict] = {}
+
+    def _stub(*, observations=None, **_):
+        nonlocal captured
+        captured["observations"] = observations or {}
+        return PersonaDecision(
+            signal=signal,
+            confidence=confidence,
+            reasoning=f"Stubbed {signal} decision",
+            constraints=constraints or {},
+        )
+
+    return captured, _stub
+
+
 def test_squeeze_warning_blocks_and_covers(monkeypatch):
     prices = _build_flat_prices()
     monkeypatch.setattr("src.agents.short_squeeze_guardian.get_prices", lambda *_, **__: prices)
-    monkeypatch.setattr(
-        "src.agents.short_squeeze_guardian.invoke_persona",
-        _persona_passthrough
+    captured, persona_stub = _persona_stub_factory(
+        signal="squeeze_warning",
+        confidence=91.0,
+        constraints={
+            "block_new_shorts": True,
+            "allow_short": False,
+            "target_short_shares": 0,
+            "force_cover_qty": 40,
+        },
     )
+    monkeypatch.setattr("src.agents.short_squeeze_guardian.persona_from_observations", persona_stub)
 
     features = {
         "close": 420.0,
@@ -79,20 +102,31 @@ def test_squeeze_warning_blocks_and_covers(monkeypatch):
     payload = result["data"]["analyst_signals"]["short_squeeze_guardian_agent"]["TSLA"]
 
     assert payload["signal"] == "squeeze_warning"
-    constraints = payload["constraints"]
-    assert constraints.get("block_new_shorts") is True
-    assert constraints.get("max_short_exposure_pct") == 0.0
-    assert constraints.get("force_cover_qty") == 40
-    assert constraints.get("target_short_shares") == 0
+    assert payload["confidence"] == 91
+    assert payload["constraints"] == {
+        "block_new_shorts": True,
+        "allow_short": False,
+        "target_short_shares": 0,
+        "force_cover_qty": 40,
+    }
+    assert "score" not in payload
+
+    observations = captured["observations"]
+    assert observations["data_status"] == "data_ready"
+    assert observations["squeeze_features"] == features
+    assert observations["current_short_shares"] == 40
+    assert "auto_signal_hint" not in observations
 
 
 def test_elevated_risk_trims_existing_short(monkeypatch):
     prices = _build_flat_prices()
     monkeypatch.setattr("src.agents.short_squeeze_guardian.get_prices", lambda *_, **__: prices)
-    monkeypatch.setattr(
-        "src.agents.short_squeeze_guardian.invoke_persona",
-        _persona_passthrough
+    captured, persona_stub = _persona_stub_factory(
+        signal="elevated_risk",
+        confidence=72.0,
+        constraints={"block_new_shorts": True, "allow_short": False, "target_short_shares": 4},
     )
+    monkeypatch.setattr("src.agents.short_squeeze_guardian.persona_from_observations", persona_stub)
 
     features = {
         "close": 360.0,
@@ -115,20 +149,21 @@ def test_elevated_risk_trims_existing_short(monkeypatch):
     payload = result["data"]["analyst_signals"]["short_squeeze_guardian_agent"]["TSLA"]
 
     assert payload["signal"] == "elevated_risk"
-    constraints = payload["constraints"]
-    assert constraints.get("block_new_shorts") is True
-    assert constraints.get("max_short_exposure_pct") == 0.03
-    assert constraints.get("target_short_shares") == 4
-    assert "Short squeeze risk trimming" in constraints.get("force_cover_reason", "")
+    assert payload["confidence"] == 72
+    assert payload["constraints"] == {"block_new_shorts": True, "allow_short": False, "target_short_shares": 4}
+
+    observations = captured["observations"]
+    assert observations["data_status"] == "data_ready"
+    assert observations["squeeze_features"] == features
+    assert observations["current_short_shares"] == 10
+    assert observations["diagnostic_notes"]
 
 
 def test_calm_mode_sets_soft_cap(monkeypatch):
     prices = _build_flat_prices()
     monkeypatch.setattr("src.agents.short_squeeze_guardian.get_prices", lambda *_, **__: prices)
-    monkeypatch.setattr(
-        "src.agents.short_squeeze_guardian.invoke_persona",
-        _persona_passthrough
-    )
+    captured, persona_stub = _persona_stub_factory(signal="calm", confidence=48.0, constraints={})
+    monkeypatch.setattr("src.agents.short_squeeze_guardian.persona_from_observations", persona_stub)
 
     features = {
         "close": 310.0,
@@ -151,7 +186,10 @@ def test_calm_mode_sets_soft_cap(monkeypatch):
     payload = result["data"]["analyst_signals"]["short_squeeze_guardian_agent"]["TSLA"]
 
     assert payload["signal"] == "calm"
-    constraints = payload["constraints"]
-    assert constraints.get("max_short_exposure_pct") == 0.08
-    assert constraints.get("block_new_shorts") is None or constraints.get("block_new_shorts") is False
+    assert payload["confidence"] == 48
+    assert payload["constraints"] == {}
 
+    observations = captured["observations"]
+    assert observations["data_status"] == "data_ready"
+    assert observations["current_short_shares"] == 0
+    assert observations["squeeze_features"] == features

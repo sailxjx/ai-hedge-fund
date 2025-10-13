@@ -50,19 +50,20 @@ def _base_state(short_shares: int = 0):
     }
 
 
-def _persona_passthrough(**kwargs):
-    default = kwargs.get("default_decision", {})
-    constraints = default.get("constraints")
-    if isinstance(constraints, dict):
-        fallback_constraints = constraints
-    else:
-        fallback_constraints = {}
-    return PersonaDecision(
-        signal=str(default.get("signal", "neutral")),
-        confidence=float(default.get("confidence", 0)),
-        reasoning=str(default.get("reasoning", "")),
-        constraints=fallback_constraints,
-    )
+def _persona_stub_factory(signal: str, confidence: float, constraints: dict | None = None):
+    captured: dict[str, dict] = {}
+
+    def _stub(*, observations=None, **_):
+        nonlocal captured
+        captured["observations"] = observations or {}
+        return PersonaDecision(
+            signal=signal,
+            confidence=confidence,
+            reasoning=f"Stubbed {signal} decision",
+            constraints=constraints or {},
+        )
+
+    return captured, _stub
 
 
 def test_breakout_cover_forces_full_cover(monkeypatch):
@@ -71,10 +72,17 @@ def test_breakout_cover_forces_full_cover(monkeypatch):
         "src.agents.breakout_cover_sentinel.get_prices",
         lambda *_, **__: prices,
     )
-    monkeypatch.setattr(
-        "src.agents.breakout_cover_sentinel.invoke_persona",
-        _persona_passthrough
+    captured, persona_stub = _persona_stub_factory(
+        signal="breakout_cover",
+        confidence=92.0,
+        constraints={
+            "preferred_direction": "long",
+            "block_new_shorts": True,
+            "allow_short": False,
+            "target_short_shares": 0,
+        },
     )
+    monkeypatch.setattr("src.agents.breakout_cover_sentinel.persona_from_observations", persona_stub)
 
     features = {
         "close": 280.0,
@@ -87,22 +95,27 @@ def test_breakout_cover_forces_full_cover(monkeypatch):
         "volume_ratio": 1.2,
         "atr_ratio": 0.01,
     }
-    monkeypatch.setattr(
-        "src.agents.breakout_cover_sentinel._compute_features", lambda _: features
-    )
+    monkeypatch.setattr("src.agents.breakout_cover_sentinel._compute_features", lambda _: features)
 
     state = _base_state(short_shares=30)
     result = breakout_cover_sentinel_agent(state)
     payload = result["data"]["analyst_signals"]["breakout_cover_sentinel_agent"]["TSLA"]
 
     assert payload["signal"] == "breakout_cover"
-    constraints = payload["constraints"]
-    assert constraints["block_new_shorts"] is True
-    assert constraints["allow_short"] is False
-    assert constraints["target_short_shares"] == 0
-    assert constraints["max_short_exposure_pct"] == 0.0
-    assert constraints["force_cover_qty"] == 30
-    assert constraints["preferred_direction"] == "long"
+    assert payload["confidence"] == 92
+    assert payload["constraints"] == {
+        "preferred_direction": "long",
+        "block_new_shorts": True,
+        "allow_short": False,
+        "target_short_shares": 0,
+    }
+    assert "score" not in payload
+
+    observations = captured["observations"]
+    assert observations["data_status"] == "data_ready"
+    assert observations["current_short_shares"] == 30
+    assert observations["breakout_features"] == features
+    assert "auto_signal_hint" not in observations
 
 
 def test_uptrend_defensive_trims_existing_shorts(monkeypatch):
@@ -111,10 +124,12 @@ def test_uptrend_defensive_trims_existing_shorts(monkeypatch):
         "src.agents.breakout_cover_sentinel.get_prices",
         lambda *_, **__: prices,
     )
-    monkeypatch.setattr(
-        "src.agents.breakout_cover_sentinel.invoke_persona",
-        _persona_passthrough
+    captured, persona_stub = _persona_stub_factory(
+        signal="uptrend_defensive",
+        confidence=71.0,
+        constraints={"block_new_shorts": True, "max_short_exposure_pct": 0.02},
     )
+    monkeypatch.setattr("src.agents.breakout_cover_sentinel.persona_from_observations", persona_stub)
 
     features = {
         "close": 265.0,
@@ -127,21 +142,22 @@ def test_uptrend_defensive_trims_existing_shorts(monkeypatch):
         "volume_ratio": 0.6,
         "atr_ratio": 0.01,
     }
-    monkeypatch.setattr(
-        "src.agents.breakout_cover_sentinel._compute_features", lambda _: features
-    )
+    monkeypatch.setattr("src.agents.breakout_cover_sentinel._compute_features", lambda _: features)
 
     state = _base_state(short_shares=10)
     result = breakout_cover_sentinel_agent(state)
     payload = result["data"]["analyst_signals"]["breakout_cover_sentinel_agent"]["TSLA"]
 
     assert payload["signal"] == "uptrend_defensive"
-    constraints = payload["constraints"]
-    assert constraints["block_new_shorts"] is True
-    assert constraints["max_short_exposure_pct"] == 0.02
-    assert constraints["target_short_shares"] == 3
-    assert constraints["force_cover_qty"] == 7
-    assert constraints["preferred_direction"] == "long"
+    assert payload["confidence"] == 71
+    assert payload["constraints"] == {"block_new_shorts": True, "max_short_exposure_pct": 0.02}
+
+    observations = captured["observations"]
+    assert observations["data_status"] == "data_ready"
+    assert observations["breakout_features"] == features
+    assert observations["current_short_shares"] == 10
+    assert observations["diagnostic_notes"]
+    assert "auto_confidence_hint" not in observations
 
 
 def test_balanced_mode_sets_soft_cap(monkeypatch):
@@ -150,10 +166,8 @@ def test_balanced_mode_sets_soft_cap(monkeypatch):
         "src.agents.breakout_cover_sentinel.get_prices",
         lambda *_, **__: prices,
     )
-    monkeypatch.setattr(
-        "src.agents.breakout_cover_sentinel.invoke_persona",
-        _persona_passthrough
-    )
+    captured, persona_stub = _persona_stub_factory(signal="balanced", confidence=48.0)
+    monkeypatch.setattr("src.agents.breakout_cover_sentinel.persona_from_observations", persona_stub)
 
     features = {
         "close": 252.0,
@@ -166,17 +180,18 @@ def test_balanced_mode_sets_soft_cap(monkeypatch):
         "volume_ratio": -0.1,
         "atr_ratio": 0.01,
     }
-    monkeypatch.setattr(
-        "src.agents.breakout_cover_sentinel._compute_features", lambda _: features
-    )
+    monkeypatch.setattr("src.agents.breakout_cover_sentinel._compute_features", lambda _: features)
 
     state = _base_state(short_shares=0)
     result = breakout_cover_sentinel_agent(state)
     payload = result["data"]["analyst_signals"]["breakout_cover_sentinel_agent"]["TSLA"]
 
     assert payload["signal"] == "balanced"
-    constraints = payload["constraints"]
-    assert constraints["max_short_exposure_pct"] == 0.06
-    assert constraints.get("block_new_shorts") in (None, False)
-    assert "force_cover_qty" not in constraints
+    assert payload["confidence"] == 48
+    assert payload["constraints"] == {}
+    assert "score" not in payload
 
+    observations = captured["observations"]
+    assert observations["breakout_features"] == features
+    assert observations["current_short_shares"] == 0
+    assert observations["data_status"] == "data_ready"

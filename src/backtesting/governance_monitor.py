@@ -37,11 +37,13 @@ DEFAULT_LEDGER = Path("log/backtest.csv")
 DEFAULT_ANALYSIS_DIR = Path("log/analysis")
 DEFAULT_TODO_PATH = Path("TODO.md")
 DEFAULT_REPORT_PATH = Path("log/analysis/governance_report.json")
+DEFAULT_ASYNC_REPORT_PATH = Path("log/analysis/governance_async.json")
 
 DEFAULT_MIN_SHARPE = 0.5
 DEFAULT_MAX_DRAWDOWN_MAGNITUDE = 5.0  # percent units (absolute)
 DEFAULT_MIN_RETURN = 0.0
 DEFAULT_REGRESSION_TOLERANCE = 0.1
+DEFAULT_ASYNC_UTILIZATION_THRESHOLD = 0.2
 
 
 @dataclass(slots=True)
@@ -62,6 +64,13 @@ class LedgerEntry:
     benchmark_return_pct: float | None
     hit_rate: str | None
     log_path: str | None
+    timing_summary_path: str | None = None
+    async_agent_invoke_total: float | None = None
+    async_per_agent_total: float | None = None
+    async_concurrency_ratio: float | None = None
+    async_semaphore_utilization: float | None = None
+    async_slowest_agent: str | None = None
+    async_slowest_agent_avg_seconds: float | None = None
 
 
 @dataclass(slots=True)
@@ -85,6 +94,36 @@ class GuardrailBreach:
             "comparison": self.comparison,
             "timestamp": self.timestamp.isoformat(),
             "log_path": self.log_path,
+        }
+
+
+@dataclass(slots=True)
+class AsyncLatencyAlert:
+    """Async persona semaphore utilization alert derived from telemetry."""
+
+    label: str
+    semaphore_utilization: float
+    concurrency_ratio: float | None
+    agent_invoke_total: float | None
+    per_agent_total: float | None
+    slowest_agent: str | None
+    slowest_agent_avg_seconds: float | None
+    timestamp: datetime
+    log_path: str | None
+    timing_summary_path: str | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "label": self.label,
+            "semaphore_utilization": self.semaphore_utilization,
+            "concurrency_ratio": self.concurrency_ratio,
+            "agent_invoke_total": self.agent_invoke_total,
+            "per_agent_total": self.per_agent_total,
+            "slowest_agent": self.slowest_agent,
+            "slowest_agent_avg_seconds": self.slowest_agent_avg_seconds,
+            "timestamp": self.timestamp.isoformat(),
+            "log_path": self.log_path,
+            "timing_summary_path": self.timing_summary_path,
         }
 
 
@@ -142,6 +181,7 @@ class GovernanceReport:
     guardrail_breaches: list[GuardrailBreach]
     regressions: list[RegressionRecord]
     motifs: list[MotifSummary]
+    async_alerts: list[AsyncLatencyAlert]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -149,6 +189,7 @@ class GovernanceReport:
             "guardrail_breaches": [item.to_dict() for item in self.guardrail_breaches],
             "regressions": [item.to_dict() for item in self.regressions],
             "motifs": [item.to_dict() for item in self.motifs],
+            "async_alerts": [item.to_dict() for item in self.async_alerts],
         }
 
 
@@ -201,6 +242,13 @@ def parse_ledger_row(row: dict[str, str]) -> LedgerEntry | None:
         benchmark_return_pct=parse_float(row.get("benchmark_return_pct")),
         hit_rate=row.get("hit_rate"),
         log_path=row.get("log_path"),
+        timing_summary_path=row.get("timing_summary_path"),
+        async_agent_invoke_total=parse_float(row.get("async_agent_invoke_total_seconds")),
+        async_per_agent_total=parse_float(row.get("async_per_agent_total_seconds")),
+        async_concurrency_ratio=parse_float(row.get("async_concurrency_ratio")),
+        async_semaphore_utilization=parse_float(row.get("async_semaphore_utilization")),
+        async_slowest_agent=row.get("async_slowest_agent"),
+        async_slowest_agent_avg_seconds=parse_float(row.get("async_slowest_agent_avg_seconds")),
     )
 
 
@@ -313,6 +361,36 @@ def detect_regressions(
     return regressions
 
 
+def detect_async_latency_alerts(
+    entries: Iterable[LedgerEntry],
+    *,
+    utilization_threshold: float,
+) -> list[AsyncLatencyAlert]:
+    """Identify async latency alerts based on semaphore utilization."""
+
+    alerts: list[AsyncLatencyAlert] = []
+    for label_entries in iter_latest_per_label(entries):
+        latest = label_entries[-1]
+        utilization = latest.async_semaphore_utilization
+        if utilization is None or utilization <= utilization_threshold:
+            continue
+        alerts.append(
+            AsyncLatencyAlert(
+                label=latest.label,
+                semaphore_utilization=utilization,
+                concurrency_ratio=latest.async_concurrency_ratio,
+                agent_invoke_total=latest.async_agent_invoke_total,
+                per_agent_total=latest.async_per_agent_total,
+                slowest_agent=latest.async_slowest_agent,
+                slowest_agent_avg_seconds=latest.async_slowest_agent_avg_seconds,
+                timestamp=latest.timestamp,
+                log_path=latest.log_path,
+                timing_summary_path=latest.timing_summary_path,
+            )
+        )
+    return alerts
+
+
 def mine_recurring_motifs(analysis_dir: Path) -> list[MotifSummary]:
     """Aggregate recurring diagnostic motifs from analysis artifacts."""
 
@@ -390,9 +468,7 @@ def build_todo_updates(
     updates: list[str] = []
     for breach in breaches:
         log_hint = f" (log {breach.log_path})" if breach.log_path else ""
-        updates.append(
-            f"  - [ ] {date_slug}: Guardrail {breach.metric} {breach.comparison} {breach.threshold} hit by '{breach.label}' ({breach.value:.2f}){log_hint}"
-        )
+        updates.append(f"  - [ ] {date_slug}: Guardrail {breach.metric} {breach.comparison} {breach.threshold} hit by '{breach.label}' ({breach.value:.2f}){log_hint}")
     return updates
 
 
@@ -431,6 +507,12 @@ def persist_report(report: GovernanceReport, path: Path) -> None:
     path.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def persist_async_alerts(alerts: Sequence[AsyncLatencyAlert], path: Path) -> None:
+    payload = [alert.to_dict() for alert in alerts]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def run_governance_monitor(
     *,
     ledger_path: Path,
@@ -441,6 +523,8 @@ def run_governance_monitor(
     max_drawdown_magnitude: float,
     min_return: float,
     regression_tolerance: float,
+    async_utilization_threshold: float,
+    async_report_path: Path,
     dry_run: bool,
     now: datetime | None = None,
 ) -> GovernanceReport:
@@ -455,15 +539,18 @@ def run_governance_monitor(
     )
     regressions = detect_regressions(entries, tolerance=regression_tolerance)
     motifs = mine_recurring_motifs(analysis_dir)
+    async_alerts = detect_async_latency_alerts(entries, utilization_threshold=async_utilization_threshold)
 
     report = GovernanceReport(
         generated_at=evaluation_time,
         guardrail_breaches=breaches,
         regressions=regressions,
         motifs=motifs,
+        async_alerts=async_alerts,
     )
 
     persist_report(report, report_path)
+    persist_async_alerts(async_alerts, async_report_path)
 
     if not dry_run and todo_path is not None:
         updates = build_todo_updates(breaches, evaluation_time)
@@ -478,6 +565,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR, help="Directory containing diagnostics")
     parser.add_argument("--todo", type=Path, default=DEFAULT_TODO_PATH, help="Path to TODO.md for auto-queuing tasks")
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT_PATH, help="Output JSON report path")
+    parser.add_argument(
+        "--async-report",
+        type=Path,
+        default=DEFAULT_ASYNC_REPORT_PATH,
+        help="Output JSON path for async telemetry alerts.",
+    )
     parser.add_argument("--min-sharpe", type=float, default=DEFAULT_MIN_SHARPE, help="Sharpe threshold guardrail")
     parser.add_argument(
         "--max-drawdown",
@@ -497,6 +590,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_REGRESSION_TOLERANCE,
         help="Minimum drop required to flag a regression",
     )
+    parser.add_argument(
+        "--async-utilization-threshold",
+        type=float,
+        default=DEFAULT_ASYNC_UTILIZATION_THRESHOLD,
+        help="Upper bound for async semaphore utilization before alerting (0-1 scale).",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Do not modify TODO.md")
     return parser.parse_args(argv)
 
@@ -512,18 +611,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_drawdown_magnitude=args.max_drawdown,
         min_return=args.min_return,
         regression_tolerance=args.regression_tolerance,
+        async_utilization_threshold=args.async_utilization_threshold,
+        async_report_path=args.async_report,
         dry_run=args.dry_run,
     )
 
     summary_lines = [
-        f"Generated governance report with {len(report.guardrail_breaches)} guardrail breaches, "
-        f"{len(report.regressions)} regressions, and {len(report.motifs)} motifs.",
+        f"Generated governance report with {len(report.guardrail_breaches)} guardrail breaches, " f"{len(report.regressions)} regressions, and {len(report.motifs)} motifs.",
     ]
     if report.guardrail_breaches:
         for breach in report.guardrail_breaches:
-            summary_lines.append(
-                f"- {breach.label}: {breach.metric} {breach.comparison} {breach.threshold} (value={breach.value:.2f})"
-            )
+            summary_lines.append(f"- {breach.label}: {breach.metric} {breach.comparison} {breach.threshold} (value={breach.value:.2f})")
     print("\n".join(summary_lines))
     return 0
 

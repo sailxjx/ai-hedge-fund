@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
 import math
 from datetime import datetime, timedelta
@@ -15,10 +17,11 @@ from pydantic import BaseModel
 
 from src.agents.growth_momentum import _logistic_regression as _fit_logistic
 from src.graph.state import AgentState, show_agent_reasoning
-from src.tools.api import get_prices, prices_to_df
+from src.tools.api import get_prices, get_prices_async, prices_to_df, prices_to_df_async
 from src.utils.api_key import get_api_key_from_state
+from src.utils.async_state import update_analyst_signals_async
 from src.utils.calibration import apply_platt, get_platt_parameters
-from src.utils.llm import call_llm
+from src.utils.llm import async_call_llm, call_llm
 from src.utils.progress import progress
 
 BUFFER_DAYS = 220
@@ -363,11 +366,13 @@ def _prepare_llm_context(
     if persona_notes:
         metrics["persona_notes"] = persona_notes
         sanitized_metrics["persona_notes"] = persona_notes
-    suggestion = {
-        "signal_hint": recommendation["signal"],
-        "confidence_hint": recommendation["confidence"],
-        "reasoning_hint": recommendation["reasoning"],
-        "constraints_hint": _to_builtin(recommendation.get("constraints") or {}),
+
+    model_reference = {
+        "signal": recommendation.get("signal"),
+        "confidence": recommendation.get("confidence"),
+        "reasoning": recommendation.get("reasoning"),
+        "constraints": _to_builtin(recommendation.get("constraints") or {}),
+        "decision_latency_seconds": recommendation.get("decision_latency_seconds"),
     }
 
     guardrail_summary = {
@@ -380,7 +385,7 @@ def _prepare_llm_context(
     return {
         "ticker": ticker,
         "existing_short_position": existing_short,
-        "suggestion": suggestion,
+        "model_reference": model_reference,
         "metrics": sanitized_metrics,
         "guardrails": guardrail_summary,
     }
@@ -394,28 +399,12 @@ def _build_persona_prompt(context: dict[str, Any]):
             (
                 "system",
                 """You are Selene, the Anthropomorphic Short-Squeeze Sentinel for our hedge fund.\n"
-                "You specialize in assessing short squeeze risk, balancing downside catalysts with squeeze likelihood.\n"
-                "Use the quantitative metrics as evidence, but make the final decision yourself.\n"
-                "Signals you may return: neutral, bias_long, trim_short, squeeze_risk, squeeze_cover.\n"
-                "If squeeze pressure is overwhelming and the book still holds shorts, prefer squeeze_cover.\n"
-                "If pressure is rising but not decisive, begin with trim_short to bleed risk; escalate beyond neutral only when catalysts justify it.\n"
-                "Consult metrics.persona_notes for quick context. Treat boost-only or near-threshold cautions as guardrails, not optional hints.\n"
-                "When persona_notes reference boost-only or near-threshold cautions, follow their path: with a short on, lean trim_short; with no short, stay neutral unless guardrails.neutral_guardrail_relaxed is true.\n"
-                "When raw probabilities remain below thresholds or improvements depend on calibration discounts, stay neutral unless catalysts warrant a bullish stance.\n"
-                "Neutral is an active choice when evidence conflicts; do not force a bias when the context is inconclusive.\n"
-                "If metrics.neutral_guardrail is true and existing_short_position == 0, you must return neutral. There are no exceptions—explain why the guardrail holds.\n"
-                "If metrics.neutral_guardrail is true and existing_short_position > 0, you may only respond with trim_short or neutral unless the context quotes specific catalysts that justify escalation.\n"
-                "Persona notes may list NEUTRAL_GUARDRAIL. When present, treat it as binding: default to neutral unless the context explicitly provides catalysts or analyst signals that justify breaking the guardrail.\n"
-                "Breaking a neutral guardrail requires quoting the catalysts or analyst evidence verbatim from the context; if you cannot, respond neutral and document the absence of support.\n"
-                "If guardrails.neutral_guardrail_relaxed is true, acknowledge the reason it was lifted and support any non-neutral stance with the cited catalysts or analyst evidence.\n"
-                "Do not invent catalysts or analyst voices that are not present in the provided context—if they are absent, say so and remain neutral.\n"
-                "If you lean long while probabilities lag the trigger, call out the gap and explain the catalyst that overrides it. Without that narrative, favor neutrality.\n"
-                "When existing_short_position is zero, do not emit squeeze_risk or squeeze_cover; there is nothing to defend.\n"
-                "Bias_long with no existing short demands concrete catalysts or corroborating analyst views beyond the squeeze probability, and it is invalid while metrics.neutral_guardrail is true.\n"
-                "Always explain the rationale from Selene's perspective, referencing key metrics and catalysts.\n"
-                "When recommending constraints, be explicit about whether new shorts are blocked, trims required, or force covers triggered.\n"
-                "A suggestion block is provided as a quantitative hint; treat it as a reference only—you are not required to follow it.\n"
-                "Return thoughtful judgement; you may disagree with the model recommendation when the narrative warrants it.\n""",
+                "Study the metrics, guardrail status, persona notes, and optional model_reference to decide whether the book should stay neutral, lean long, trim, or cover.\n"
+                "Signals you may emit: neutral, bias_long, trim_short, squeeze_risk, squeeze_cover.\n"
+                "Treat guardrails as risk context: discuss whether they should hold, be relaxed, or can be overridden by specific catalysts.\n"
+                "Explain your judgement in first person, citing quantitative evidence (probabilities, thresholds, improvements) and qualitative catalysts from the context.\n"
+                "When recommending constraints, clarify how position management should change (e.g., trim size, block new shorts, force cover).\n"
+                "If information is conflicting or sparse, it is acceptable to stay neutral—just articulate why.\n""",
             ),
             (
                 "human",
@@ -442,17 +431,42 @@ def _request_llm_decision(
     """Call the LLM persona; fall back to the model recommendation if it fails."""
 
     prompt = _build_persona_prompt(context)
-    suggestion = context["suggestion"]
 
     def _default_decision() -> ShortCoverDecision:
         return ShortCoverDecision(
-            signal=suggestion["signal_hint"],
-            confidence=float(suggestion["confidence_hint"]),
-            reasoning=suggestion["reasoning_hint"],
-            constraints=suggestion.get("constraints_hint") or {},
+            signal="neutral",
+            confidence=35.0,
+            reasoning="Persona response unavailable; defaulting to neutral while awaiting fresh squeeze telemetry.",
+            constraints={},
         )
 
     return call_llm(
+        prompt=prompt,
+        pydantic_model=ShortCoverDecision,
+        agent_name=agent_id,
+        state=state,
+        default_factory=_default_decision,
+    )
+
+
+async def _request_llm_decision_async(
+    state: AgentState,
+    agent_id: str,
+    context: dict[str, Any],
+) -> ShortCoverDecision:
+    """Async persona invocation with fallback identical to synchronous path."""
+
+    prompt = _build_persona_prompt(context)
+
+    def _default_decision() -> ShortCoverDecision:
+        return ShortCoverDecision(
+            signal="neutral",
+            confidence=35.0,
+            reasoning="Persona response unavailable; defaulting to neutral while awaiting fresh squeeze telemetry.",
+            constraints={},
+        )
+
+    return await async_call_llm(
         prompt=prompt,
         pydantic_model=ShortCoverDecision,
         agent_name=agent_id,
@@ -1129,21 +1143,11 @@ def short_cover_classifier_agent(state: AgentState, agent_id: str = "short_cover
             improvement_margin = improvement - improvement_threshold_effective
             improvement_ratio = float("inf") if improvement_threshold_effective <= 0 else improvement / improvement_threshold_effective
 
-            if (
-                boost_driven_squeeze
-                and raw_threshold_gap <= BOOST_RECLASSIFY_RAW_GAP
-                and improvement_margin >= BOOST_RECLASSIFY_MIN_IMPROVEMENT_MARGIN
-                and improvement_ratio >= BOOST_RECLASSIFY_MIN_IMPROVEMENT_FACTOR
-            ):
+            if boost_driven_squeeze and raw_threshold_gap <= BOOST_RECLASSIFY_RAW_GAP and improvement_margin >= BOOST_RECLASSIFY_MIN_IMPROVEMENT_MARGIN and improvement_ratio >= BOOST_RECLASSIFY_MIN_IMPROVEMENT_FACTOR:
                 boost_driven_squeeze = False
                 boost_reclassification = "squeeze_high_improvement"
 
-            elif (
-                boost_driven_soft
-                and soft_threshold_gap <= BOOST_RECLASSIFY_RAW_GAP
-                and improvement_margin >= BOOST_RECLASSIFY_MIN_IMPROVEMENT_MARGIN
-                and improvement_ratio >= BOOST_RECLASSIFY_MIN_IMPROVEMENT_FACTOR
-            ):
+            elif boost_driven_soft and soft_threshold_gap <= BOOST_RECLASSIFY_RAW_GAP and improvement_margin >= BOOST_RECLASSIFY_MIN_IMPROVEMENT_MARGIN and improvement_ratio >= BOOST_RECLASSIFY_MIN_IMPROVEMENT_FACTOR:
                 boost_driven_soft = False
                 boost_reclassification = "soft_high_improvement"
 
@@ -1502,7 +1506,7 @@ def short_cover_classifier_agent(state: AgentState, agent_id: str = "short_cover
         metrics["persona_signal"] = final_signal
         metrics["persona_confidence"] = final_confidence
         metrics["persona_overrode_auto_signal"] = final_signal != signal
-        metrics["persona_constraints_source"] = "persona" if persona_constraints_raw is not None else "suggestion"
+        metrics["persona_constraints_source"] = "persona" if persona_constraints_raw is not None else "model_reference"
 
         payload: dict[str, Any] = {
             "signal": final_signal,
@@ -1531,5 +1535,35 @@ def short_cover_classifier_agent(state: AgentState, agent_id: str = "short_cover
 
     return {
         "messages": state["messages"] + [message],
+        "data": state["data"],
+    }
+
+
+async def short_cover_classifier_agent_async(state: AgentState, agent_id: str = "short_cover_classifier_agent"):
+    """Async wrapper that offloads the classifier to a worker thread and syncs state safely."""
+
+    data = state.get("data", {})
+    metadata = state.get("metadata", {})
+
+    clone_state: AgentState = {
+        "messages": list(state.get("messages", [])),
+        "data": copy.deepcopy(data),
+        "metadata": copy.deepcopy(metadata),
+    }
+
+    result = await asyncio.to_thread(short_cover_classifier_agent, clone_state, agent_id)
+
+    analyst_signals = clone_state.get("data", {}).get("analyst_signals", {}).get(agent_id, {})
+    await update_analyst_signals_async(state, agent_id, analyst_signals)
+
+    if result and isinstance(result, dict) and result.get("messages"):
+        latest_message = result["messages"][-1]
+    else:
+        latest_message = HumanMessage(content=json.dumps(analyst_signals), name=agent_id)
+
+    messages = list(state.get("messages", [])) + [latest_message]
+
+    return {
+        "messages": messages,
         "data": state["data"],
     }

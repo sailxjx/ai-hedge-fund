@@ -66,6 +66,25 @@ The API will be available at:
 - API Endpoint: http://localhost:8000
 - API Documentation: http://localhost:8000/docs
 
+## Async Personas & Streaming Telemetry
+
+- Async persona execution is enabled by default. Launching `uvicorn` automatically
+  compiles the async LangGraph and streams persona updates in parallel.
+- Export `ASYNC_PERSONAS=0` (or `false`, `off`) only if you need to run the legacy
+  synchronous graph for bisects. Remove the override (or set it back to `1`) to restore
+  async operation.
+- Optional tuning knobs:
+  - `LLM_ASYNC_MAX_CONCURRENCY` (default `8`) limits concurrent persona LLM invocations.
+  - `LLM_CALL_TIMEOUT_SECONDS` / `LLM_MAX_RETRIES` configure async retry behaviour for
+    the shared helper in `src/utils/llm.py`.
+- Progress streaming now emits UTC timestamps and persona analyses for each update. The
+  FastAPI routes register handlers that match the upgraded signature in
+  `src/utils/progress.py`, so the frontend can surface async trace data without any extra
+  wiring.
+- The backend shares the same async agent registry as the CLI/backtester. Refer to
+  `docs/async_parallelism.md` for scheduler flags (`--include-async-telemetry`) and more
+  instrumentation details.
+
 ## API Endpoints
 
 - `POST /hedge-fund/run`: Run the AI Hedge Fund with specified parameters

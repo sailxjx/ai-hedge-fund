@@ -9,7 +9,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from src.tools.llm_backtest_digest import AnalystVote, BacktestDigest, parse_backtest_digest
+from src.tools.llm_backtest_digest import (
+    AnalystVote,
+    BacktestDigest,
+    parse_backtest_digest,
+)
 
 CORE_ANALYSTS = {
     "Aswath Damodaran",

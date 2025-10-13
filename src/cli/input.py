@@ -1,18 +1,18 @@
-import os
-import sys
-from datetime import datetime
-from dateutil.relativedelta import relativedelta
 import argparse
 import json
+import os
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Optional
+
 import questionary
 from colorama import Fore, Style
+from dateutil.relativedelta import relativedelta
 
+from src.llm.models import get_model_info, LLM_ORDER, ModelProvider, OLLAMA_LLM_ORDER
 from src.utils.analysts import ANALYST_ORDER
-from src.llm.models import LLM_ORDER, OLLAMA_LLM_ORDER, get_model_info, ModelProvider
 from src.utils.ollama import ensure_ollama_and_model
-
-from dataclasses import dataclass
-from typing import Optional, Any
 
 
 def add_common_args(
@@ -116,9 +116,7 @@ def select_analysts(flags: dict | None = None) -> list[str]:
         print("\n\nInterrupt received. Exiting...")
         sys.exit(0)
 
-    print(
-        f"\nSelected analysts: {', '.join(Fore.GREEN + c.title().replace('_', ' ') + Style.RESET_ALL for c in choices)}\n"
-    )
+    print(f"\nSelected analysts: {', '.join(Fore.GREEN + c.title().replace('_', ' ') + Style.RESET_ALL for c in choices)}\n")
     return choices
 
 
@@ -156,9 +154,7 @@ def select_model(use_ollama: bool) -> tuple[str, str]:
             sys.exit(1)
 
         model_provider = ModelProvider.OLLAMA.value
-        print(
-            f"\nSelected {Fore.CYAN}Ollama{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n"
-        )
+        print(f"\nSelected {Fore.CYAN}Ollama{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n")
     else:
         model_choice = questionary.select(
             "Select your LLM model:",
@@ -187,9 +183,7 @@ def select_model(use_ollama: bool) -> tuple[str, str]:
                 sys.exit(0)
 
         if model_info:
-            print(
-                f"\nSelected {Fore.CYAN}{model_provider}{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n"
-            )
+            print(f"\nSelected {Fore.CYAN}{model_provider}{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n")
         else:
             model_provider = "Unknown"
             print(f"\nSelected model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n")
@@ -239,9 +233,7 @@ def _parse_model_option(model_option: str, provider_option: str | None) -> tuple
     else:
         match = _find_model_entry(model_token)
         if not match:
-            raise ValueError(
-                "Unable to determine provider for the chosen model. Use provider:model format or supply --model-provider."
-            )
+            raise ValueError("Unable to determine provider for the chosen model. Use provider:model format or supply --model-provider.")
         resolved_name, resolved_provider = match
         provider_value = resolved_provider
         # Prefer catalog model name unless empty (e.g., Azure deployment entry)
@@ -252,9 +244,7 @@ def _parse_model_option(model_option: str, provider_option: str | None) -> tuple
         if provider_value == ModelProvider.AZURE_OPENAI.value:
             model_token = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "").strip()
             if not model_token:
-                raise ValueError(
-                    "Azure OpenAI selection requires a deployment name. Provide one via provider:model or set AZURE_OPENAI_DEPLOYMENT_NAME."
-                )
+                raise ValueError("Azure OpenAI selection requires a deployment name. Provide one via provider:model or set AZURE_OPENAI_DEPLOYMENT_NAME.")
         else:
             raise ValueError("Model name cannot be empty. Provide one via provider:model format.")
 
@@ -356,10 +346,12 @@ def parse_cli_inputs(
 
     # Normalize parsed values
     tickers = parse_tickers(getattr(args, "tickers", None))
-    selected_analysts = select_analysts({
-        "analysts_all": getattr(args, "analysts_all", False),
-        "analysts": getattr(args, "analysts", None),
-    })
+    selected_analysts = select_analysts(
+        {
+            "analysts_all": getattr(args, "analysts_all", False),
+            "analysts": getattr(args, "analysts", None),
+        }
+    )
 
     use_ollama = getattr(args, "ollama", False)
     if getattr(args, "model", None) or getattr(args, "model_provider", None):

@@ -31,5 +31,3 @@ def test_agent_controller_normalizes_and_snapshots(portfolio):
     assert out["decisions"]["MSFT"]["quantity"] == 0.0
     # Analyst signals are passed through
     assert "agentA" in out["analyst_signals"]
-
-

@@ -5,23 +5,23 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import numpy as np
 import pandas as pd
 from langchain_core.messages import HumanMessage
 
-from src.agents.persona_utils import persona_from_observations
+from src.agents.persona_utils import (
+    async_persona_from_observations,
+    persona_from_observations,
+)
 from src.graph.state import AgentState, show_agent_reasoning
-from src.tools.api import get_prices, prices_to_df
+from src.tools.api import get_prices, get_prices_async, prices_to_df, prices_to_df_async
 from src.utils.api_key import get_api_key_from_state
+from src.utils.async_state import update_analyst_signals_async
 from src.utils.progress import progress
-
 
 EPSILON = 1e-9
 PERSONA_NAME = "Vega"
 PERSONA_ROLE = "an anthropomorphic breakout sentinel safeguarding the portfolio from runaway rallies"
-PERSONA_BACKSTORY = (
-    "A former short seller, Vega now scouts upside breakouts to decide when entrenched shorts must yield to momentum."
-)
+PERSONA_BACKSTORY = "A former short seller, Vega now scouts upside breakouts to decide when entrenched shorts must yield to momentum."
 PERSONA_INSTRUCTIONS = (
     "Balance the quantitative breakout score with practical portfolio context before issuing the signal.",
     "Demand forced covers only when upside pressure is overwhelming or short inventory is stubborn.",
@@ -42,13 +42,6 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def _bounded_component(value: float, scale: float, cap: float = 1.0) -> float:
-    if scale <= 0 or not np.isfinite(value):
-        return 0.0
-    normalised = value / scale
-    return float(np.clip(normalised, 0.0, cap))
 
 
 def _compute_features(df: pd.DataFrame) -> dict[str, float]:
@@ -97,36 +90,46 @@ def _compute_features(df: pd.DataFrame) -> dict[str, float]:
     }
 
 
-def _score_breakout(features: dict[str, float]) -> tuple[str, float]:
-    ret3_component = _bounded_component(max(0.0, features.get("ret_3", 0.0)), 0.04, cap=1.0)
-    ret5_component = _bounded_component(max(0.0, features.get("ret_5", 0.0)), 0.06, cap=1.1)
-    ret10_component = _bounded_component(max(0.0, features.get("ret_10", 0.0)), 0.12, cap=1.0)
-    breakout_component = _bounded_component(max(0.0, features.get("breakout_gap", 0.0)), 0.035, cap=1.1)
-    ema_component = _bounded_component(max(0.0, features.get("ema_slope", 0.0)), 0.05, cap=1.0)
-    volume_component = _bounded_component(max(0.0, features.get("volume_ratio", 0.0)), 0.9, cap=1.0)
+def _prepare_observation(
+    *,
+    df: pd.DataFrame | None,
+    ticker: str,
+    current_short: int,
+) -> tuple[dict[str, Any], dict[str, float]]:
+    notes: list[str] = []
+    features: dict[str, float] = {}
+    data_status = "missing_prices"
 
-    score = float(
-        np.clip(
-            0.18 * ret3_component
-            + 0.25 * ret5_component
-            + 0.20 * ret10_component
-            + 0.17 * breakout_component
-            + 0.10 * ema_component
-            + 0.10 * volume_component,
-            0.0,
-            1.35,
-        )
-    )
+    if df is None:
+        notes.append("No price history retrieved for breakout diagnostics.")
+    else:
+        if df.empty or len(df) < 25:
+            data_status = "insufficient_history"
+            notes.append("Need at least 25 observations to assess breakout persistence.")
+        else:
+            features = _compute_features(df)
+            if not features:
+                data_status = "feature_extraction_failed"
+                notes.append("Unable to derive breakout metrics from the recent window.")
+            else:
+                data_status = "data_ready"
+                notes.append(
+                    "Breakout diagnostics: "
+                    f"5d return {features['ret_5']:.1%}, "
+                    f"10d return {features['ret_10']:.1%}, "
+                    f"gap vs. 20d high {features['breakout_gap']:.1%}, "
+                    f"volume vs. 20d avg {(features['volume_ratio'] + 1):.2f}x."
+                )
 
-    ret5 = features.get("ret_5", 0.0)
-    breakout_gap = features.get("breakout_gap", 0.0)
+    observations = {
+        "ticker": ticker,
+        "current_short_shares": current_short,
+        "data_status": data_status,
+        "breakout_features": {key: float(val) for key, val in features.items()} if features else {},
+        "diagnostic_notes": notes,
+    }
 
-    if score >= 0.75 or (ret5 >= 0.055 and breakout_gap >= 0.018):
-        return "breakout_cover", score
-    if score >= 0.45 or (ret5 >= 0.04 and breakout_gap >= 0.012):
-        return "uptrend_defensive", score
-    return "balanced", score
-
+    return observations, features
 
 
 def breakout_cover_sentinel_agent(state: AgentState, agent_id: str = "breakout_cover_sentinel_agent"):
@@ -137,7 +140,7 @@ def breakout_cover_sentinel_agent(state: AgentState, agent_id: str = "breakout_c
     start_date = data["start_date"]
     end_date = data["end_date"]
     portfolio = data.get("portfolio", {})
-    positions = (portfolio.get("positions") or {})
+    positions = portfolio.get("positions") or {}
     api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
 
     sentinel_view: dict[str, dict[str, Any]] = {}
@@ -152,86 +155,9 @@ def breakout_cover_sentinel_agent(state: AgentState, agent_id: str = "breakout_c
         )
 
         current_short = int(_safe_float((positions.get(ticker, {}) or {}).get("short", 0), 0.0))
-        features: dict[str, float] = {}
-        score = 0.0
-        auto_signal = "no_data"
-        auto_confidence = 0
-        auto_reasoning = "I do not have sufficient market data to assess breakout pressure."
-        auto_constraints: dict[str, Any] = {}
-
-        if not prices:
-            progress.update_status(agent_id, ticker, "Failed: Missing price data")
-        else:
-            df = prices_to_df(prices)
-            if df.empty or len(df) < 25:
-                auto_signal = "insufficient_history"
-                auto_confidence = 20
-                auto_reasoning = "Need at least 25 sessions to evaluate breakout persistence."
-                progress.update_status(agent_id, ticker, "Failed: Insufficient history")
-            else:
-                features = _compute_features(df)
-                if not features:
-                    auto_signal = "no_features"
-                    auto_confidence = 15
-                    auto_reasoning = "Unable to derive breakout metrics from recent history."
-                    progress.update_status(agent_id, ticker, "Failed: Feature extraction")
-                else:
-                    auto_signal, score = _score_breakout(features)
-                    auto_confidence = int(round(min(1.0, score) * 100))
-                    reasoning_parts = [
-                        f"5d {features['ret_5']:.1%}",
-                        f"10d {features['ret_10']:.1%}",
-                        f"gap_high {features['breakout_gap']:.1%}",
-                        f"vol_ratio {features['volume_ratio'] + 1:.2f}x",
-                    ]
-                    auto_reasoning = "; ".join(reasoning_parts)
-
-                    auto_constraints = {}
-                    if auto_signal == "breakout_cover":
-                        auto_constraints.update(
-                            {
-                                "preferred_direction": "long",
-                                "block_new_shorts": True,
-                                "allow_short": False,
-                                "max_short_exposure_pct": 0.0,
-                                "target_short_shares": 0,
-                            }
-                        )
-                        if current_short > 0:
-                            auto_constraints["force_cover_qty"] = current_short
-                            auto_constraints["force_cover_reason"] = "Breakout cover sentinel forcing full unwind"
-                    elif auto_signal == "uptrend_defensive":
-                        trimmed_short = max(0, int(np.floor(current_short * 0.3)))
-                        auto_constraints.update(
-                            {
-                                "preferred_direction": "long",
-                                "block_new_shorts": True,
-                                "allow_short": True,
-                                "max_short_exposure_pct": 0.02,
-                                "target_short_shares": trimmed_short,
-                            }
-                        )
-                        if current_short > trimmed_short:
-                            auto_constraints["force_cover_qty"] = current_short - trimmed_short
-                            auto_constraints["force_cover_reason"] = "Breakout cover sentinel trimming shorts"
-                    else:
-                        auto_constraints.update(
-                            {
-                                "allow_short": True,
-                                "max_short_exposure_pct": 0.06,
-                            }
-                        )
-
-        observations = {
-            "ticker": ticker,
-            "current_short_shares": current_short,
-            "breakout_features": {key: round(val, 6) for key, val in features.items()},
-            "breakout_score": round(score, 3),
-            "suggested_constraints": dict(auto_constraints),
-            "auto_signal_hint": auto_signal,
-            "auto_reasoning": auto_reasoning,
-            "auto_confidence": auto_confidence,
-        }
+        df = prices_to_df(prices) if prices else None
+        observations, features = _prepare_observation(df=df, ticker=ticker, current_short=current_short)
+        progress.update_status(agent_id, ticker, f"Observation ready ({observations['data_status']})")
 
         decision = persona_from_observations(
             state=state,
@@ -244,32 +170,23 @@ def breakout_cover_sentinel_agent(state: AgentState, agent_id: str = "breakout_c
             persona_instructions=PERSONA_INSTRUCTIONS,
             default_signal="balanced",
             default_confidence=55.0,
-            default_reasoning="Defaulted to balanced after missing persona call.",
+            default_reasoning="Defaulted to balanced after observation-only fallback.",
         )
 
+        confidence = int(max(0, min(round(decision.confidence), 100)))
         metrics = dict(observations["breakout_features"])
-        metrics.update(
-            {
-                "score": round(score, 3),
-                "current_short_shares": current_short,
-            }
-        )
+        metrics["current_short_shares"] = current_short
 
         payload: dict[str, Any] = {
             "signal": decision.signal,
-            "confidence": int(max(0, min(round(decision.confidence), 100))),
-            "score": round(score, 3),
+            "confidence": confidence,
             "reasoning": decision.reasoning,
             "metrics": metrics,
             "constraints": decision.constraints or {},
             "meta": {"observations": observations},
         }
 
-        progress.update_status(
-            agent_id,
-            ticker,
-            f"{payload['signal'].upper()} @ {payload['confidence']}/100 | breakout {payload['score']:.2f}",
-        )
+        progress.update_status(agent_id, ticker, f"{payload['signal'].upper()} @ {confidence}/100")
 
         sentinel_view[ticker] = payload
 
@@ -279,6 +196,78 @@ def breakout_cover_sentinel_agent(state: AgentState, agent_id: str = "breakout_c
         show_agent_reasoning(sentinel_view, "Breakout Cover Sentinel")
 
     state["data"].setdefault("analyst_signals", {})[agent_id] = sentinel_view
+    progress.update_status(agent_id, None, "Done")
+
+    return {
+        "messages": state["messages"] + [message],
+        "data": state["data"],
+    }
+
+
+async def breakout_cover_sentinel_agent_async(state: AgentState, agent_id: str = "breakout_cover_sentinel_agent"):
+    """Async breakout sentinel orchestrating persona guidance."""
+
+    data = state["data"]
+    tickers = data["tickers"]
+    start_date = data["start_date"]
+    end_date = data["end_date"]
+    portfolio = data.get("portfolio", {})
+    positions = portfolio.get("positions") or {}
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+
+    sentinel_view: dict[str, dict[str, Any]] = {}
+
+    for ticker in tickers:
+        progress.update_status(agent_id, ticker, "Scanning breakout pressure")
+        prices = await get_prices_async(
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            api_key=api_key,
+        )
+
+        current_short = int(_safe_float((positions.get(ticker, {}) or {}).get("short", 0), 0.0))
+        df = await prices_to_df_async(prices) if prices else None
+        observations, features = _prepare_observation(df=df, ticker=ticker, current_short=current_short)
+        progress.update_status(agent_id, ticker, f"Observation ready ({observations['data_status']})")
+
+        decision = await async_persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="balanced",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to balanced after observation-only fallback.",
+        )
+
+        confidence = int(max(0, min(round(decision.confidence), 100)))
+        metrics = dict(observations["breakout_features"])
+        metrics["current_short_shares"] = current_short
+
+        payload: dict[str, Any] = {
+            "signal": decision.signal,
+            "confidence": confidence,
+            "reasoning": decision.reasoning,
+            "metrics": metrics,
+            "constraints": decision.constraints or {},
+            "meta": {"observations": observations},
+        }
+
+        progress.update_status(agent_id, ticker, f"{payload['signal'].upper()} @ {confidence}/100")
+
+        sentinel_view[ticker] = payload
+
+    message = HumanMessage(content=json.dumps(sentinel_view), name=agent_id)
+
+    if state["metadata"].get("show_reasoning"):
+        show_agent_reasoning(sentinel_view, "Breakout Cover Sentinel")
+
+    await update_analyst_signals_async(state, agent_id, sentinel_view)
     progress.update_status(agent_id, None, "Done")
 
     return {

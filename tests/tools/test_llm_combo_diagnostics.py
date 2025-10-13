@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.tools.llm_combo_diagnostics import analyse_digest, main
 from src.tools.llm_backtest_digest import parse_backtest_digest
-
+from src.tools.llm_combo_diagnostics import analyse_digest, main
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_LOG = REPO_ROOT / "tests" / "fixtures" / "logs" / "sample_backtest_agents.txt"

@@ -4,11 +4,11 @@ import sys
 from pathlib import Path
 
 from src.tools.agent_iteration import (
-    GuardedFiles,
-    IterationHypothesis,
     build_agent_file_map,
     determine_guard_paths,
     generate_hypotheses,
+    GuardedFiles,
+    IterationHypothesis,
     run_command,
 )
 
@@ -89,5 +89,12 @@ def test_determine_guard_paths_includes_extra(tmp_path: Path) -> None:
 
 
 def test_run_command_reports_timeout() -> None:
-    result = run_command([sys.executable, "-c", "import time; time.sleep(0.2)",], timeout=0.05)
+    result = run_command(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(0.2)",
+        ],
+        timeout=0.05,
+    )
     assert result.status == "timeout"

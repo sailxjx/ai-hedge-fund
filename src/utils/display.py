@@ -1,8 +1,10 @@
+import json
+import os
+
 from colorama import Fore, Style
 from tabulate import tabulate
+
 from .analysts import ANALYST_ORDER
-import os
-import json
 
 
 def _wrap_text(text: str, width: int = 60) -> str:
@@ -66,7 +68,7 @@ def print_trading_output(result: dict) -> None:
         for agent, signals in result.get("analyst_signals", {}).items():
             if ticker not in signals:
                 continue
-                
+
             # Skip Risk Management agent in the signals section
             if agent == "risk_management_agent":
                 continue
@@ -81,7 +83,7 @@ def print_trading_output(result: dict) -> None:
                 "BEARISH": Fore.RED,
                 "NEUTRAL": Fore.YELLOW,
             }.get(signal_type, Fore.WHITE)
-            
+
             # Get reasoning if available
             reasoning_str = ""
             if "reasoning" in signal and signal["reasoning"]:
@@ -122,11 +124,7 @@ def print_trading_output(result: dict) -> None:
         )
 
         # Surface risk manager constraints and overrides for auditability
-        risk_snapshot = (
-            result.get("analyst_signals", {})
-            .get("risk_management_agent", {})
-            .get(ticker, {})
-        )
+        risk_snapshot = result.get("analyst_signals", {}).get("risk_management_agent", {}).get(ticker, {})
 
         risk_rows: list[list[str]] = []
         if risk_snapshot:
@@ -139,16 +137,12 @@ def print_trading_output(result: dict) -> None:
                     ]
                 )
 
-            constraint_notes = (
-                risk_snapshot.get("reasoning", {}).get("constraints") or []
-            )
+            constraint_notes = risk_snapshot.get("reasoning", {}).get("constraints") or []
             if constraint_notes:
                 constraint_lines = []
                 for idx, note in enumerate(constraint_notes, start=1):
                     wrapped = _wrap_text(str(note))
-                    constraint_lines.append(
-                        f"{idx}. {wrapped.replace('\n', '\n   ')}"
-                    )
+                    constraint_lines.append(f"{idx}. {wrapped.replace('\n', '\n   ')}")
                 constraints_text = "\n".join(constraint_lines)
             else:
                 constraints_text = "None"
@@ -176,10 +170,7 @@ def print_trading_output(result: dict) -> None:
             )
 
         if risk_rows:
-            print(
-                f"\n{Fore.WHITE}{Style.BRIGHT}RISK CONTROLS:{Style.RESET_ALL} "
-                f"[{Fore.CYAN}{ticker}{Style.RESET_ALL}]"
-            )
+            print(f"\n{Fore.WHITE}{Style.BRIGHT}RISK CONTROLS:{Style.RESET_ALL} " f"[{Fore.CYAN}{ticker}{Style.RESET_ALL}]")
             print(tabulate(risk_rows, tablefmt="grid", colalign=("left", "left")))
 
         # Print Trading Decision Table
@@ -205,21 +196,21 @@ def print_trading_output(result: dict) -> None:
             ],
             ["Reasoning", f"{Fore.WHITE}{wrapped_reasoning}{Style.RESET_ALL}"],
         ]
-        
+
         print(f"\n{Fore.WHITE}{Style.BRIGHT}TRADING DECISION:{Style.RESET_ALL} [{Fore.CYAN}{ticker}{Style.RESET_ALL}]")
         print(tabulate(decision_data, tablefmt="grid", colalign=("left", "left")))
 
     # Print Portfolio Summary
     print(f"\n{Fore.WHITE}{Style.BRIGHT}PORTFOLIO SUMMARY:{Style.RESET_ALL}")
     portfolio_data = []
-    
+
     # Extract portfolio manager reasoning (common for all tickers)
     portfolio_manager_reasoning = None
     for ticker, decision in decisions.items():
         if decision.get("reasoning"):
             portfolio_manager_reasoning = decision.get("reasoning")
             break
-            
+
     for ticker, decision in decisions.items():
         action = decision.get("action", "").upper()
         action_color = {
@@ -239,7 +230,7 @@ def print_trading_output(result: dict) -> None:
         )
 
     headers = [f"{Fore.WHITE}Ticker", "Action", "Quantity", "Confidence"]
-    
+
     # Print the portfolio summary table
     print(
         tabulate(
@@ -249,7 +240,7 @@ def print_trading_output(result: dict) -> None:
             colalign=("left", "center", "right", "right"),
         )
     )
-    
+
     # Print Portfolio Manager's reasoning if available
     if portfolio_manager_reasoning:
         # Handle different types of reasoning (string, dict, etc.)
@@ -292,8 +283,8 @@ def print_backtest_results(table_rows: list) -> None:
 
         # Adjusted indexes after adding Long/Short Shares
         position_str = latest_summary[7].split("$")[1].split(Style.RESET_ALL)[0].replace(",", "")
-        cash_str     = latest_summary[8].split("$")[1].split(Style.RESET_ALL)[0].replace(",", "")
-        total_str    = latest_summary[9].split("$")[1].split(Style.RESET_ALL)[0].replace(",", "")
+        cash_str = latest_summary[8].split("$")[1].split(Style.RESET_ALL)[0].replace(",", "")
+        total_str = latest_summary[9].split("$")[1].split(Style.RESET_ALL)[0].replace(",", "")
 
         print(f"Cash Balance: {Fore.CYAN}${float(cash_str):,.2f}{Style.RESET_ALL}")
         print(f"Total Position Value: {Fore.YELLOW}${float(position_str):,.2f}{Style.RESET_ALL}")
@@ -338,14 +329,14 @@ def print_backtest_results(table_rows: list) -> None:
             ],
             tablefmt="grid",
             colalign=(
-                "left",    # Date
-                "left",    # Ticker
+                "left",  # Date
+                "left",  # Ticker
                 "center",  # Action
-                "right",   # Quantity
-                "right",   # Price
-                "right",   # Long Shares
-                "right",   # Short Shares
-                "right",   # Position Value
+                "right",  # Quantity
+                "right",  # Price
+                "right",  # Long Shares
+                "right",  # Short Shares
+                "right",  # Position Value
             ),
         )
     )
@@ -391,16 +382,8 @@ def format_backtest_row(
         if benchmark_return_pct is not None:
             bench_color = Fore.GREEN if benchmark_return_pct >= 0 else Fore.RED
             benchmark_str = f"{bench_color}{benchmark_return_pct:+.2f}%{Style.RESET_ALL}"
-        turnover_str = (
-            f"{Fore.MAGENTA}{turnover_rate * 100.0:.2f}%{Style.RESET_ALL}"
-            if turnover_rate is not None
-            else ""
-        )
-        info_ratio_str = (
-            f"{Fore.YELLOW}{information_ratio:.2f}{Style.RESET_ALL}"
-            if information_ratio is not None
-            else ""
-        )
+        turnover_str = f"{Fore.MAGENTA}{turnover_rate * 100.0:.2f}%{Style.RESET_ALL}" if turnover_rate is not None else ""
+        info_ratio_str = f"{Fore.YELLOW}{information_ratio:.2f}{Style.RESET_ALL}" if information_ratio is not None else ""
         return [
             date,
             f"{Fore.WHITE}{Style.BRIGHT}PORTFOLIO SUMMARY{Style.RESET_ALL}",
@@ -427,7 +410,7 @@ def format_backtest_row(
             f"{action_color}{action.upper()}{Style.RESET_ALL}",
             f"{action_color}{quantity:,.0f}{Style.RESET_ALL}",
             f"{Fore.WHITE}{price:,.2f}{Style.RESET_ALL}",
-            f"{Fore.GREEN}{long_shares:,.0f}{Style.RESET_ALL}",   # Long Shares
-            f"{Fore.RED}{short_shares:,.0f}{Style.RESET_ALL}",    # Short Shares
+            f"{Fore.GREEN}{long_shares:,.0f}{Style.RESET_ALL}",  # Long Shares
+            f"{Fore.RED}{short_shares:,.0f}{Style.RESET_ALL}",  # Short Shares
             f"{Fore.YELLOW}{position_value:,.2f}{Style.RESET_ALL}",
         ]

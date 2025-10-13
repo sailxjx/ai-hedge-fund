@@ -81,11 +81,7 @@ def test_parse_log_includes_override_counts(tmp_path):
     ]
     override_path = tmp_path / "risk_overrides.jsonl"
     override_path.write_text(
-        "\n".join(
-            entry if isinstance(entry, str) else json.dumps(entry)
-            for entry in override_entries
-        )
-        + "\n",
+        "\n".join(entry if isinstance(entry, str) else json.dumps(entry) for entry in override_entries) + "\n",
         encoding="utf-8",
     )
 
@@ -110,9 +106,7 @@ def test_cli_with_override_logs(tmp_path):
     )
 
     override_path = tmp_path / "run_overrides.jsonl"
-    override_payload = {
-        "risk_snapshot": {"overrides": {"force_cover_qty": 4, "target_long_shares": 12}}
-    }
+    override_payload = {"risk_snapshot": {"overrides": {"force_cover_qty": 4, "target_long_shares": 12}}}
     override_path.write_text(json.dumps(override_payload) + "\n", encoding="utf-8")
 
     csv_path = tmp_path / "summary.csv"

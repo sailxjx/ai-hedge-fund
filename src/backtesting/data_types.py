@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Mapping, Optional, Sequence, TypedDict, Literal
 from enum import Enum
+from typing import Any, Dict, Literal, Mapping, Optional, Sequence, TypedDict
 
 import pandas as pd
 
@@ -13,6 +13,7 @@ class Action(str, Enum):
     SHORT = "short"
     COVER = "cover"
     HOLD = "hold"
+
 
 # Backward-compatible alias
 ActionLiteral = Literal["buy", "sell", "short", "cover", "hold"]
@@ -102,4 +103,3 @@ class PerformanceMetrics(TypedDict, total=False):
     gross_exposure: Optional[float]
     net_exposure: Optional[float]
     turnover_rate: Optional[float]
-

@@ -24,9 +24,12 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
 try:
-    from .short_exposure_audit import SummaryRecord, parse_summary_records
+    from .short_exposure_audit import parse_summary_records, SummaryRecord
 except ImportError:  # pragma: no cover - triggered when executed as script
-    from src.backtesting.short_exposure_audit import SummaryRecord, parse_summary_records
+    from src.backtesting.short_exposure_audit import (
+        parse_summary_records,
+        SummaryRecord,
+    )
 
 
 @dataclass
@@ -169,41 +172,28 @@ def audit_overrides(
 
         # Target long exposure alignment
         if entry.target_long_shares is not None and record.long_shares != entry.target_long_shares:
-            check.issues.append(
-                f"long_shares={record.long_shares} expected {entry.target_long_shares}"
-            )
+            check.issues.append(f"long_shares={record.long_shares} expected {entry.target_long_shares}")
 
         # Target short exposure alignment (target represents final desired exposure)
         if entry.target_short_shares is not None:
             expected_short = entry.target_short_shares
             if record.short_shares != expected_short:
-                check.issues.append(
-                    f"short_shares={record.short_shares} expected {expected_short}"
-                )
+                check.issues.append(f"short_shares={record.short_shares} expected {expected_short}")
 
         # Block new shorts directive
         if entry.block_new_shorts and record.action.upper() == "SHORT":
             check.issues.append("block_new_shorts violated by SHORT action")
 
         # Maximum incremental short sizing guard
-        if (
-            entry.max_additional_short_shares is not None
-            and record.action.upper() == "SHORT"
-            and record.quantity is not None
-            and record.quantity > entry.max_additional_short_shares
-        ):
-            check.issues.append(
-                f"short quantity {record.quantity} exceeds max {entry.max_additional_short_shares}"
-            )
+        if entry.max_additional_short_shares is not None and record.action.upper() == "SHORT" and record.quantity is not None and record.quantity > entry.max_additional_short_shares:
+            check.issues.append(f"short quantity {record.quantity} exceeds max {entry.max_additional_short_shares}")
 
         # Force cover instructions
         if entry.force_cover_qty is not None:
             if record.action.upper() != "COVER":
                 check.issues.append("force_cover_qty issued but action was not COVER")
             elif record.quantity is not None and record.quantity < entry.force_cover_qty:
-                check.issues.append(
-                    f"cover quantity {record.quantity} below required {entry.force_cover_qty}"
-                )
+                check.issues.append(f"cover quantity {record.quantity} below required {entry.force_cover_qty}")
 
         # Preferred direction sanity check (best-effort)
         if entry.preferred_direction:

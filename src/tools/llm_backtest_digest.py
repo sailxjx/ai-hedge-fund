@@ -17,6 +17,7 @@ INFORMATION_RATIO_RE = re.compile(r"Information Ratio:\s*([+-]?\d+(?:\.\d+)?)")
 MAX_DRAWDOWN_RE = re.compile(r"Max Drawdown:\s*([+-]?\d+(?:\.\d+)?)%")
 BENCHMARK_RETURN_RE = re.compile(r"Benchmark Return:\s*([+-]?\d+(?:\.\d+)?)%")
 TOTAL_RETURN_RE = re.compile(r"Total Return:\s*([+-]?\d+(?:\.\d+)?)%", re.IGNORECASE)
+TURNOVER_RATE_RE = re.compile(r"Turnover Rate:\s*([+-]?\d+(?:\.\d+)?)%")
 AGENT_ANALYSIS_RE = re.compile(r"AGENT ANALYSIS:\s*\[(?P<ticker>[^\]]+)\]")
 RISK_CONTROLS_RE = re.compile(r"RISK CONTROLS:\s*\[(?P<ticker>[^\]]+)\]", re.IGNORECASE)
 TRADING_DECISION_RE = re.compile(r"TRADING DECISION:\s*\[(?P<ticker>[^\]]+)\]", re.IGNORECASE)
@@ -24,9 +25,7 @@ CONFIDENCE_RE = re.compile(r"([+-]?\d+(?:\.\d+)?)")
 DATA_FETCH_RE = re.compile(r"Stopping .*? because .*", re.IGNORECASE)
 TIMEOUT_RE = re.compile(r"timed out", re.IGNORECASE)
 SHORT_COVER_RE = re.compile(
-    r"Short Cover Classifier\[(?P<ticker>[^\]]+)\]\s*(?:Prob squeeze|Persona squeeze view)\s*"
-    r"(?P<prob>\d+(?:\.\d+)?)%\s*\(thr\s*(?P<threshold>\d+(?:\.\d+)?)%\)\s*(?:\u2192|->)\s*"
-    r"(?P<decision>[A-Z_]+)",
+    r"Short Cover Classifier\[(?P<ticker>[^\]]+)\]\s*(?:Prob squeeze|Persona squeeze view)\s*" r"(?P<prob>\d+(?:\.\d+)?)%\s*\(thr\s*(?P<threshold>\d+(?:\.\d+)?)%\)\s*(?:\u2192|->)\s*" r"(?P<decision>[A-Z_]+)",
     re.IGNORECASE,
 )
 TABLE_LINE_PREFIXES = ("|", "+", "=")
@@ -116,6 +115,7 @@ def _parse_metrics(text: str) -> dict[str, float | None]:
         "max_drawdown_pct": _extract_float(MAX_DRAWDOWN_RE, text),
         "benchmark_return_pct": _extract_float(BENCHMARK_RETURN_RE, text),
         "total_return_pct": _extract_float(TOTAL_RETURN_RE, text),
+        "turnover_rate_pct": _extract_float(TURNOVER_RATE_RE, text),
     }
 
 
@@ -175,9 +175,7 @@ def _parse_two_column_table(lines: Sequence[str]) -> dict[str, list[str]]:
         if current_key is None or not value_candidate:
             continue
 
-        if (
-            current_key == "Overrides" and ":" in value_candidate
-        ) or re.match(r"\d+\.\s", value_candidate):
+        if (current_key == "Overrides" and ":" in value_candidate) or re.match(r"\d+\.\s", value_candidate):
             table[current_key].append(value_candidate)
             continue
 
@@ -258,7 +256,7 @@ def _parse_agent_table(lines: Sequence[str], ticker: str | None) -> list[Analyst
         reasoning_value = _clean_whitespace(reasoning_raw)
 
         # Skip header rows inside the table
-        if agent_value.lower() == 'agent' and signal_value.lower() == 'signal':
+        if agent_value.lower() == "agent" and signal_value.lower() == "signal":
             current = None
             continue
 

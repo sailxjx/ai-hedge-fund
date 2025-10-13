@@ -1,4 +1,4 @@
-from src.tools.short_cover_metrics_snapshot import Snapshot, _to_dataframe
+from src.tools.short_cover_metrics_snapshot import _to_dataframe, Snapshot
 
 
 def test_snapshot_to_flat_dict_and_dataframe(tmp_path):

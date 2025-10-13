@@ -3,8 +3,8 @@ import textwrap
 import pytest
 
 from src.backtesting.short_exposure_audit import (
-    ExposureFailure,
     detect_short_failures,
+    ExposureFailure,
     parse_args,
     parse_summary_records,
 )

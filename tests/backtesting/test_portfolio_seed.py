@@ -16,9 +16,7 @@ def test_portfolio_applies_short_seed():
                 "short_margin_used": 3_000.0,
             }
         },
-        "realized_gains": {
-            "TSLA": {"long": 0.0, "short": 100.0}
-        },
+        "realized_gains": {"TSLA": {"long": 0.0, "short": 100.0}},
     }
 
     portfolio = Portfolio(
@@ -50,9 +48,7 @@ def test_portfolio_seed_adds_additional_tickers():
                 "short_margin_used": 0.0,
             }
         },
-        "realized_gains": {
-            "NVDA": {"long": 25.0, "short": 0.0}
-        },
+        "realized_gains": {"NVDA": {"long": 25.0, "short": 0.0}},
     }
 
     portfolio = Portfolio(
@@ -84,9 +80,7 @@ def test_backtest_engine_registers_portfolio_seed():
                 "short_margin_used": 1_500.0,
             }
         },
-        "realized_gains": {
-            "TSLA": {"long": 0.0, "short": 0.0}
-        },
+        "realized_gains": {"TSLA": {"long": 0.0, "short": 0.0}},
     }
 
     def dummy_agent(**kwargs):
@@ -105,4 +99,4 @@ def test_backtest_engine_registers_portfolio_seed():
         portfolio_seed=seed,
     )
 
-    assert engine._metadata_overrides.get("portfolio_seeded") is True
+    assert engine._base_metadata_overrides.get("portfolio_seeded") is True

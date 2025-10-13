@@ -1,24 +1,26 @@
+import asyncio
 import datetime
 import io
 import os
+import time
+
 import pandas as pd
 import requests
-import time
 from requests import exceptions as requests_exceptions
 
 from src.data.cache import get_cache
 from src.data.models import (
+    CompanyFactsResponse,
     CompanyNews,
     CompanyNewsResponse,
     FinancialMetrics,
     FinancialMetricsResponse,
-    Price,
-    PriceResponse,
-    LineItem,
-    LineItemResponse,
     InsiderTrade,
     InsiderTradeResponse,
-    CompanyFactsResponse,
+    LineItem,
+    LineItemResponse,
+    Price,
+    PriceResponse,
 )
 
 # Global cache instance
@@ -62,7 +64,7 @@ def _make_api_request(
 ) -> requests.Response:
     """
     Make an API request with rate limiting handling and moderate backoff.
-    
+
     Args:
         url: The URL to request
         headers: Headers to include in the request
@@ -70,16 +72,14 @@ def _make_api_request(
         json_data: JSON data for POST requests
         max_retries: Maximum number of retries (default: 3)
         request_timeout: Optional timeout applied to the request in seconds
-    
+
     Returns:
         requests.Response: The response object
-    
+
     Raises:
         Exception: If the request fails with a non-429 error
     """
-    effective_timeout = (
-        DEFAULT_API_REQUEST_TIMEOUT_SECONDS if request_timeout is None else request_timeout
-    )
+    effective_timeout = DEFAULT_API_REQUEST_TIMEOUT_SECONDS if request_timeout is None else request_timeout
 
     for attempt in range(max_retries + 1):  # +1 for initial attempt
         request_kwargs = {"headers": headers}
@@ -97,16 +97,17 @@ def _make_api_request(
             raise TimeoutError(f"Request to {url} timed out") from exc
         except requests_exceptions.RequestException as exc:
             raise Exception(f"Error during request to {url}: {exc}") from exc
-        
+
         if response.status_code == 429 and attempt < max_retries:
             # Linear backoff: 60s, 90s, 120s, 150s...
             delay = 60 + (30 * attempt)
             print(f"Rate limited (429). Attempt {attempt + 1}/{max_retries + 1}. Waiting {delay}s before retrying...")
             time.sleep(delay)
             continue
-        
+
         # Return the response (whether success, other errors, or final 429)
         return response
+
 
 STOOQ_SYMBOL_MAP = {
     "^GSPC": "^spx",
@@ -178,7 +179,7 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
     """Fetch price data from cache or API."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date}_{end_date}"
-    
+
     # Check cache first - simple exact match
     if cached_data := _cache.get_prices(cache_key):
         return [Price(**price) for price in cached_data]
@@ -197,9 +198,7 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
             request_timeout=DEFAULT_API_REQUEST_TIMEOUT_SECONDS,
         )
     except TimeoutError:
-        print(
-            f"Skipping price fetch for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds."
-        )
+        print(f"Skipping price fetch for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds.")
         return []
     if response.status_code != 200:
         fallback_prices = _fetch_stooq_prices(ticker, start_date, end_date, cache_key)
@@ -232,7 +231,7 @@ def get_financial_metrics(
     """Fetch financial metrics from cache or API."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{period}_{end_date}_{limit}"
-    
+
     # Check cache first - simple exact match
     if cached_data := _cache.get_financial_metrics(cache_key):
         return [FinancialMetrics(**metric) for metric in cached_data]
@@ -251,9 +250,7 @@ def get_financial_metrics(
             request_timeout=DEFAULT_API_REQUEST_TIMEOUT_SECONDS,
         )
     except TimeoutError:
-        print(
-            f"Skipping financial metrics for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds."
-        )
+        print(f"Skipping financial metrics for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds.")
         return []
     if response.status_code != 200:
         raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
@@ -308,9 +305,7 @@ def search_line_items(
             request_timeout=DEFAULT_API_REQUEST_TIMEOUT_SECONDS,
         )
     except TimeoutError:
-        print(
-            f"Skipping line item search for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds."
-        )
+        print(f"Skipping line item search for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds.")
         return []
     if response.status_code != 200:
         raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
@@ -334,7 +329,7 @@ def get_insider_trades(
     """Fetch insider trades from cache or API."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date or 'none'}_{end_date}_{limit}"
-    
+
     # Check cache first - simple exact match
     if cached_data := _cache.get_insider_trades(cache_key):
         return [InsiderTrade(**trade) for trade in cached_data]
@@ -361,9 +356,7 @@ def get_insider_trades(
                 request_timeout=DEFAULT_API_REQUEST_TIMEOUT_SECONDS,
             )
         except TimeoutError:
-            print(
-                f"Stopping insider trades fetch for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds."
-            )
+            print(f"Stopping insider trades fetch for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds.")
             break
         if response.status_code != 200:
             raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
@@ -406,7 +399,7 @@ def get_company_news(
     """Fetch company news from cache or API."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date or 'none'}_{end_date}_{limit}"
-    
+
     # Check cache first - simple exact match
     if cached_data := _cache.get_company_news(cache_key):
         return [CompanyNews(**news) for news in cached_data]
@@ -427,9 +420,7 @@ def get_company_news(
 
     while True:
         if fetch_deadline and time.time() >= fetch_deadline:
-            print(
-                f"Stopping company news fetch for {ticker} after {fetch_timeout} seconds (partial results returned)."
-            )
+            print(f"Stopping company news fetch for {ticker} after {fetch_timeout} seconds (partial results returned).")
             break
         if max_pages is not None and page_count >= max_pages:
             print(f"Stopping company news fetch for {ticker} after reaching {max_pages} pages.")
@@ -447,14 +438,10 @@ def get_company_news(
                 request_timeout=COMPANY_NEWS_TIMEOUT_SECONDS,
             )
         except TimeoutError:
-            print(
-                f"Skipping company news for {ticker} because the request timed out after {COMPANY_NEWS_TIMEOUT_SECONDS} seconds."
-            )
+            print(f"Skipping company news for {ticker} because the request timed out after {COMPANY_NEWS_TIMEOUT_SECONDS} seconds.")
             return []
         if response.status_code == 404:
-            print(
-                f"Company news unavailable for {ticker} between {start_date or 'beginning'} and {current_end_date}; proceeding without news coverage."
-            )
+            print(f"Company news unavailable for {ticker} between {start_date or 'beginning'} and {current_end_date}; proceeding without news coverage.")
             _cache.set_company_news(cache_key, [])
             return []
         if response.status_code != 200:
@@ -471,9 +458,7 @@ def get_company_news(
         page_count += 1
 
         if fetch_deadline and time.time() >= fetch_deadline:
-            print(
-                f"Stopping company news fetch for {ticker} after {fetch_timeout} seconds (partial results returned)."
-            )
+            print(f"Stopping company news fetch for {ticker} after {fetch_timeout} seconds (partial results returned).")
             break
 
         # Only continue pagination if we have a start_date and got a full page
@@ -517,9 +502,7 @@ def get_market_cap(
                 request_timeout=DEFAULT_API_REQUEST_TIMEOUT_SECONDS,
             )
         except TimeoutError:
-            print(
-                f"Skipping company facts for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds."
-            )
+            print(f"Skipping company facts for {ticker} because the request timed out after {DEFAULT_API_REQUEST_TIMEOUT_SECONDS} seconds.")
             return None
         if response.status_code != 200:
             print(f"Error fetching company facts: {ticker} - {response.status_code}")
@@ -557,3 +540,61 @@ def prices_to_df(prices: list[Price]) -> pd.DataFrame:
 def get_price_data(ticker: str, start_date: str, end_date: str, api_key: str = None) -> pd.DataFrame:
     prices = get_prices(ticker, start_date, end_date, api_key=api_key)
     return prices_to_df(prices)
+
+
+# Async wrappers for blocking API helpers
+async def get_prices_async(ticker: str, start_date: str, end_date: str, api_key: str | None = None) -> list[Price]:
+    return await asyncio.to_thread(get_prices, ticker, start_date, end_date, api_key)
+
+
+async def prices_to_df_async(prices: list[Price]) -> pd.DataFrame:
+    return await asyncio.to_thread(prices_to_df, prices)
+
+
+async def get_price_data_async(ticker: str, start_date: str, end_date: str, api_key: str | None = None) -> pd.DataFrame:
+    return await asyncio.to_thread(get_price_data, ticker, start_date, end_date, api_key)
+
+
+async def get_financial_metrics_async(
+    ticker: str,
+    end_date: str,
+    period: str = "ttm",
+    limit: int = 1,
+    api_key: str | None = None,
+):
+    return await asyncio.to_thread(get_financial_metrics, ticker, end_date, period, limit, api_key)
+
+
+async def search_line_items_async(
+    ticker: str,
+    line_items: list[str],
+    end_date: str,
+    period: str = "ttm",
+    limit: int = 10,
+    api_key: str | None = None,
+):
+    return await asyncio.to_thread(search_line_items, ticker, line_items, end_date, period, limit, api_key)
+
+
+async def get_market_cap_async(ticker: str, end_date: str, api_key: str | None = None):
+    return await asyncio.to_thread(get_market_cap, ticker, end_date, api_key)
+
+
+async def get_company_news_async(
+    ticker: str,
+    end_date: str,
+    start_date: str | None = None,
+    limit: int = 100,
+    api_key: str | None = None,
+):
+    return await asyncio.to_thread(get_company_news, ticker, end_date, start_date, limit, api_key)
+
+
+async def get_insider_trades_async(
+    ticker: str,
+    end_date: str,
+    start_date: str | None = None,
+    limit: int = 100,
+    api_key: str | None = None,
+):
+    return await asyncio.to_thread(get_insider_trades, ticker, end_date, start_date, limit, api_key)

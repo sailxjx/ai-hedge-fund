@@ -94,6 +94,41 @@ COMPANY_NEWS_MAX_PAGES=8
 
 All analyst agents now emit raw observations and delegate trade intent to their anthropomorphic personas. When extending the platform, focus on enriching the observation payloads instead of encoding rule-based signals. See `src/agents/persona_utils.py::persona_from_observations` for the shared helper that every analyst uses to package metrics for the LLM personas. Backtest summaries now include turnover rate so you can quickly sanity-check how much gross notional the persona ensemble traded over the window.
 
+### Async Persona Parallelism
+
+Async persona execution is **enabled by default**. The CLI (`src/main.py`), the LangGraph backend, and the Python backtester automatically dispatch analyst, risk, and portfolio personas through the async graph. Set `ASYNC_PERSONAS=0` (or `false`, `off`) to fall back to the legacy synchronous execution when bisecting regressions. The async engine fans out LLM work in parallel while guarding shared state with `src/utils/async_state.py` and concurrency semaphores in `src/utils/llm.py`.
+
+See `docs/async_parallelism.md` for a deeper walkthrough covering scheduler flags, telemetry payloads, and the validation loop.
+
+- Async telemetry: pass `--include-async-telemetry` to `poetry run python -m src.backtesting.experiment_scheduler` (or set `include_async_telemetry` in your schedule JSON) to append timing metadata columns to `log/backtest.csv`. The scheduler will automatically locate summaries under `log/backtest_timings/` and record concurrency ratio, semaphore utilization, and the raw summary path alongside the usual performance metrics.
+
+- CLI smoke (async is default):
+  ```bash
+  poetry run python src/main.py --model-provider azure --analysts-all --tickers TSLA
+  ```
+- Backtester async run:
+  ```bash
+  poetry run python src/backtester.py --tickers TSLA,NVDA --start-date 2024-10-01 --end-date 2024-10-03
+  ```
+- Legacy sync fallback (optional):
+  ```bash
+  ASYNC_PERSONAS=0 poetry run python src/main.py --model-provider azure --analysts-all --tickers TSLA
+  ```
+- Backend + web app inherit the default; export `ASYNC_PERSONAS=0` before starting `uvicorn` only when you need to force sync dispatch.
+
+Configurability:
+- `LLM_ASYNC_MAX_CONCURRENCY` caps simultaneous persona LLM calls (default `8`).
+- `LLM_CALL_TIMEOUT_SECONDS` / `LLM_MAX_RETRIES` cover async retries just like the sync helpers.
+- `ASYNC_PERSONAS=0` explicitly forces the legacy synchronous flow (set `1`/`true` to re-enable async if you previously disabled it).
+
+Regression coverage lives in `tests/agents/test_async_persona.py`, `tests/agents/test_async_wrappers.py`, `tests/backtesting/test_async_engine.py`, and `tests/backend/test_graph_service.py`. Run them locally with:
+```bash
+poetry run pytest tests/agents/test_async_persona.py \
+  tests/agents/test_async_wrappers.py \
+  tests/backtesting/test_async_engine.py \
+  tests/backend/test_graph_service.py
+```
+
 ### ⌨️ Command Line Interface
 
 You can run the AI Hedge Fund directly via terminal. This approach offers more granular control and is useful for automation, scripting, and integration purposes.

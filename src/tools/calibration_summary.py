@@ -4,7 +4,7 @@ import argparse
 import json
 import math
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Iterable
 
@@ -263,9 +263,7 @@ def _render_aggregates(agent: str, rows: list[CalibrationMetrics]) -> str:
     delta_brier = _format_delta(pre_brier_avg, post_brier_avg)
 
     lines = ["### Aggregated Impact"]
-    lines.append(
-        "- Weighted sample count: {count}".format(count=sum(weights))
-    )
+    lines.append("- Weighted sample count: {count}".format(count=sum(weights)))
     lines.append(
         "- AUC: pre {pre} → post {post} ({delta})".format(
             pre=_format_float(pre_auc_avg),

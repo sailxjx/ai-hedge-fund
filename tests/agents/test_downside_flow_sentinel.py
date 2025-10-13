@@ -48,27 +48,31 @@ def _base_state(long_shares: int = 0, short_shares: int = 0) -> dict:
     }
 
 
-def _persona_passthrough(**kwargs):
-    default = kwargs.get("default_decision", {})
-    constraints = default.get("constraints")
-    fallback_constraints = constraints if isinstance(constraints, dict) else {}
-    return PersonaDecision(
-        signal=str(default.get("signal", "neutral")),
-        confidence=float(default.get("confidence", 0)),
-        reasoning=str(default.get("reasoning", "")),
-        constraints=fallback_constraints,
-    )
+def _persona_stub_factory(signal: str, confidence: float = 70.0, constraints: dict | None = None):
+    captured: dict[str, dict] = {}
+
+    def _stub(*, observations=None, **_):
+        nonlocal captured
+        captured["observations"] = observations or {}
+        return PersonaDecision(
+            signal=signal,
+            confidence=confidence,
+            reasoning=f"Stubbed {signal} decision",
+            constraints=constraints or {},
+        )
+
+    return captured, _stub
 
 
-def test_crash_flow_freezes_long_exposure(monkeypatch):
+def test_downside_metrics_forwarded_to_persona(monkeypatch):
     prices = _build_price_series()
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel.get_prices", lambda *_, **__: prices
+    monkeypatch.setattr("src.agents.downside_flow_sentinel.get_prices", lambda *_, **__: prices)
+    captured, persona_stub = _persona_stub_factory(
+        signal="crash_flow",
+        confidence=91.0,
+        constraints={"preferred_direction": "short", "max_long_exposure_pct": 0.05},
     )
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel.invoke_persona",
-        _persona_passthrough
-    )
+    monkeypatch.setattr("src.agents.downside_flow_sentinel.persona_from_observations", persona_stub)
 
     metrics = {
         "ret_1": -0.035,
@@ -83,31 +87,33 @@ def test_crash_flow_freezes_long_exposure(monkeypatch):
         "tail_loss20": -0.06,
         "trend_slope10": -0.018,
     }
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel._compute_metrics", lambda df: metrics
-    )
+    monkeypatch.setattr("src.agents.downside_flow_sentinel._compute_metrics", lambda df: metrics)
 
     state = _base_state(long_shares=120)
     result = downside_flow_sentinel_agent(state)
     payload = result["data"]["analyst_signals"]["downside_flow_sentinel_agent"]["TSLA"]
 
     assert payload["signal"] == "crash_flow"
-    constraints = payload["constraints"]
-    assert constraints.get("preferred_direction") == "short"
-    assert constraints.get("max_long_exposure_pct") <= 0.05
-    assert constraints.get("max_additional_long_shares") == 0
-    assert constraints.get("max_long_shares") < 120
+    assert payload["confidence"] == 91
+    assert payload["constraints"] == {"preferred_direction": "short", "max_long_exposure_pct": 0.05}
+    assert "score" not in payload
+
+    observations = captured["observations"]
+    assert observations["data_status"] == "data_ready"
+    assert observations["downside_metrics"] == metrics
+    assert observations["existing_long_shares"] == 120
+    assert "auto_signal_hint" not in observations
 
 
-def test_downside_trend_throttles_long_adds(monkeypatch):
+def test_existing_position_context_is_preserved(monkeypatch):
     prices = _build_price_series(step=-0.5)
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel.get_prices", lambda *_, **__: prices
+    monkeypatch.setattr("src.agents.downside_flow_sentinel.get_prices", lambda *_, **__: prices)
+    captured, persona_stub = _persona_stub_factory(
+        signal="downside_trend",
+        confidence=73.0,
+        constraints={"preferred_direction": "short"},
     )
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel.invoke_persona",
-        _persona_passthrough
-    )
+    monkeypatch.setattr("src.agents.downside_flow_sentinel.persona_from_observations", persona_stub)
 
     metrics = {
         "ret_1": -0.012,
@@ -122,133 +128,38 @@ def test_downside_trend_throttles_long_adds(monkeypatch):
         "tail_loss20": -0.03,
         "trend_slope10": -0.009,
     }
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel._compute_metrics", lambda df: metrics
-    )
+    monkeypatch.setattr("src.agents.downside_flow_sentinel._compute_metrics", lambda df: metrics)
 
     state = _base_state(long_shares=80)
     result = downside_flow_sentinel_agent(state)
     payload = result["data"]["analyst_signals"]["downside_flow_sentinel_agent"]["TSLA"]
 
     assert payload["signal"] == "downside_trend"
-    constraints = payload["constraints"]
-    assert constraints.get("preferred_direction") == "short"
-    assert 0 < constraints.get("max_additional_long_shares", -1) <= 16
-    assert constraints.get("max_long_shares") <= 80
+    assert payload["confidence"] == 73
+    assert payload["constraints"] == {"preferred_direction": "short"}
+
+    observations = captured["observations"]
+    assert observations["downside_metrics"] == metrics
+    assert observations["existing_long_shares"] == 80
+    assert observations["diagnostic_notes"]
+    assert "suggested_constraints" not in observations
 
 
-def test_downside_trend_with_no_existing_long_drops_share_caps(monkeypatch):
-    prices = _build_price_series(step=-0.5)
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel.get_prices", lambda *_, **__: prices
-    )
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel.invoke_persona",
-        _persona_passthrough
-    )
+def test_insufficient_history_sets_status(monkeypatch):
+    prices = _build_price_series(count=20)
+    monkeypatch.setattr("src.agents.downside_flow_sentinel.get_prices", lambda *_, **__: prices)
+    captured, persona_stub = _persona_stub_factory(signal="insufficient_history", confidence=40.0)
+    monkeypatch.setattr("src.agents.downside_flow_sentinel.persona_from_observations", persona_stub)
 
-    metrics = {
-        "ret_1": -0.012,
-        "ret_3": -0.028,
-        "ret_5": -0.052,
-        "ret_10": -0.081,
-        "ret_20": -0.11,
-        "drawdown_20": -0.08,
-        "drawdown_40": -0.13,
-        "vol_ratio": 0.38,
-        "downside_share10": 0.7,
-        "tail_loss20": -0.03,
-        "trend_slope10": -0.009,
-    }
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel._compute_metrics", lambda df: metrics
-    )
-
-    state = _base_state(long_shares=0)
+    state = _base_state(long_shares=10)
     result = downside_flow_sentinel_agent(state)
     payload = result["data"]["analyst_signals"]["downside_flow_sentinel_agent"]["TSLA"]
 
-    assert payload["signal"] == "downside_trend"
-    constraints = payload["constraints"]
-    assert constraints.get("preferred_direction") == "short"
-    assert constraints.get("max_long_exposure_pct") == 0.08
-    assert "max_additional_long_shares" not in constraints
-    assert "max_long_shares" not in constraints
+    assert payload["signal"] == "insufficient_history"
+    assert payload["confidence"] == 40
+    assert payload["constraints"] == {}
 
-
-def test_stable_regime_retains_long_flex(monkeypatch):
-    prices = _build_price_series(step=0.2)
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel.get_prices", lambda *_, **__: prices
-    )
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel.invoke_persona",
-        _persona_passthrough
-    )
-
-    metrics = {
-        "ret_1": 0.004,
-        "ret_3": 0.009,
-        "ret_5": -0.012,
-        "ret_10": -0.018,
-        "ret_20": -0.021,
-        "drawdown_20": -0.03,
-        "drawdown_40": -0.04,
-        "vol_ratio": -0.08,
-        "downside_share10": 0.3,
-        "tail_loss20": -0.005,
-        "trend_slope10": 0.002,
-    }
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel._compute_metrics", lambda df: metrics
-    )
-
-    state = _base_state(long_shares=50)
-    result = downside_flow_sentinel_agent(state)
-    payload = result["data"]["analyst_signals"]["downside_flow_sentinel_agent"]["TSLA"]
-
-    assert payload["signal"] == "stable"
-    constraints = payload["constraints"]
-    assert constraints.get("preferred_direction") is None
-    assert constraints.get("max_long_exposure_pct") == 0.16
-    assert constraints.get("max_additional_long_shares") >= 20
-    assert "max_long_shares" not in constraints
-
-
-def test_stable_regime_without_long_position_keeps_constraints_open(monkeypatch):
-    prices = _build_price_series(step=0.2)
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel.get_prices", lambda *_, **__: prices
-    )
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel.invoke_persona",
-        _persona_passthrough
-    )
-
-    metrics = {
-        "ret_1": 0.004,
-        "ret_3": 0.009,
-        "ret_5": -0.012,
-        "ret_10": -0.018,
-        "ret_20": -0.021,
-        "drawdown_20": -0.03,
-        "drawdown_40": -0.04,
-        "vol_ratio": -0.08,
-        "downside_share10": 0.3,
-        "tail_loss20": -0.005,
-        "trend_slope10": 0.002,
-    }
-    monkeypatch.setattr(
-        "src.agents.downside_flow_sentinel._compute_metrics", lambda df: metrics
-    )
-
-    state = _base_state(long_shares=0)
-    result = downside_flow_sentinel_agent(state)
-    payload = result["data"]["analyst_signals"]["downside_flow_sentinel_agent"]["TSLA"]
-
-    assert payload["signal"] == "stable"
-    constraints = payload["constraints"]
-    assert constraints.get("preferred_direction") is None
-    assert constraints.get("max_long_exposure_pct") == 0.16
-    assert "max_additional_long_shares" not in constraints
-    assert "max_long_shares" not in constraints
+    observations = captured["observations"]
+    assert observations["data_status"] == "insufficient_history"
+    assert observations["downside_metrics"] == {}
+    assert observations["existing_long_shares"] == 10

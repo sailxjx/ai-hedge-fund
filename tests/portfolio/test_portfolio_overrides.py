@@ -1,7 +1,7 @@
 from src.agents.portfolio_manager import (
-    PortfolioDecision,
     compute_allowed_actions,
     generate_trading_decision,
+    PortfolioDecision,
 )
 
 
@@ -125,6 +125,7 @@ def test_generate_trading_decision_prefills_target_long_buy():
     assert decision.action == "buy"
     assert decision.quantity == 3
     assert "Long bias" in decision.reasoning
+
 
 def test_generate_trading_decision_prefills_target_short_sell():
     portfolio = _base_portfolio()

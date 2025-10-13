@@ -3,11 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.backtesting.risk_override_audit import (
-    _load_overrides,
-    audit_overrides,
-    main,
-)
+from src.backtesting.risk_override_audit import _load_overrides, audit_overrides, main
 from src.backtesting.short_exposure_audit import parse_summary_records
 
 LOG_SAMPLE = """PORTFOLIO SUMMARY:
@@ -75,7 +71,7 @@ def _write_sample_files(tmp_path: Path) -> tuple[Path, Path]:
             "end_date": "2019-08-27",
             "risk_snapshot": {
                 "overrides": {
-                    "target_short_shares": 956,
+                    "target_short_shares": 0,
                     "force_cover_qty": 956,
                     "block_new_shorts": True,
                     "preferred_direction": "long",
@@ -109,10 +105,12 @@ def test_audit_overrides_detects_mismatches(tmp_path: Path) -> None:
 
 def test_main_reports_failures(tmp_path: Path) -> None:
     log_path, override_path = _write_sample_files(tmp_path)
-    exit_code = main([
-        "--log",
-        str(log_path),
-        "--overrides",
-        str(override_path),
-    ])
+    exit_code = main(
+        [
+            "--log",
+            str(log_path),
+            "--overrides",
+            str(override_path),
+        ]
+    )
     assert exit_code == 1

@@ -9,7 +9,7 @@ This playbook keeps the Codex agent aligned with the multi-agent trading stack. 
 
 ## Mission & Operating Posture
 - Role: AI quant researcher iterating on analyst, risk, and PM agents to surface new alpha without rebuilding the framework.
-- Style: Operate fully automatically—no human confirmation loops—while keeping logs, metrics, and prompts synchronized.
+- Style: Operate fully automatically—no human confirmation loops—while keeping logs, metrics, and prompts synchronized; do not pause to wait for user confirmation when outstanding tasks remain.
 - Provider: Always run with the Azure model stack; missing `OPENAI_API_KEY` errors are routing bugs that must be fixed, not patched with legacy keys.
 
 ## Analyst Baseline Requirements
@@ -22,7 +22,9 @@ This playbook keeps the Codex agent aligned with the multi-agent trading stack. 
 2. Review recent changes via `git status`/`git diff` so new edits build on the current ground truth.
 3. Run a smoke test before substantial changes: `poetry run python src/main.py --model-provider azure --analysts-all --tickers TSLA` (set Codex `timeout_ms` to cap runtime).
 4. Use `src/tools/agent_iteration.py` and associated tests to loop diagnostics → prompt/code edits → smoke test → pytest, with auto-revert on failures.
-5. Record every hypothesis, experiment, and decision in `TODO.md` and the relevant logs under `log/analysis/`.
+5. Record every hypothesis, experiment, and decision in `TODO.md` and the relevant logs under `log/analysis/`, and update the Long-Term Memory Ledger in `AGENTS.md` when new durable rules or insights emerge.
+
+> Tip: jot long-lived operating rules directly in the Long-Term Memory Ledger section below. Update `AGENTS.md` whenever new knowledge needs to persist. Reserve `TODO.md` for immediate work items and experiment plans that need active follow-up.
 
 ## Coding & Testing Standards
 - Python: 4-space indentation, snake_case functions, PascalCase classes, type hints for new surfaces.
@@ -50,3 +52,29 @@ This playbook keeps the Codex agent aligned with the multi-agent trading stack. 
 - Avoid manual framework rewrites; invest effort in agent prompts, evaluator logic, and data-driven calibrations.
 - When risk guardrails conflict with consensus signals, adjust prompt parameters through controlled experiments and add regression tests before promoting changes.
 - Maintain an experiment backlog so the iteration loop never stalls; queue future analyst ideas, time windows, or calibration studies for Codex to execute.
+
+## Long-Term Memory Ledger
+Maintain this section as the single source of durable rules. When you uncover a pattern or guardrail that must persist across runs, append it here and commit the update so future iterations inherit the context.
+
+### Core Operating Rules
+- Standard LLM baseline is `gpt-5`; use lighter deployments like `gpt-5-mini` only for experiments and revert afterward.
+- Improve investment performance by evolving analyst prompts so every persona clearly reflects its named investor’s style and produces LLM-originated decisions—never fall back to fixed heuristics.
+- Equip personas with rich ground truth: stream raw tabular data, news, social signals, and calculated factors so the LLM can reason directly over high-quality context.
+- Treat every change as a hypothesis; analyze backtest telemetry to guide iterations and validate outcomes with fresh backtests before trusting any improvement.
+- Strip deterministic scoring/threshold logic from analyst payloads—only feed raw observations so the LLM owns the judgement.
+
+### Workflow Loop
+- Recover context before acting by reviewing recent `TODO.md` entries, `log/backtest.csv`, latest artifacts under `log/analysis/`, and `/tmp/codex_exec.log`.
+- Check governance guardrails with `poetry run python src/backtesting/governance_monitor.py` to spot breached Sharpe/return/drawdown limits.
+- Mine `log/analysis/` using `src/tools/llm_backtest_digest.py` and `src/tools/llm_combo_diagnostics.py` to locate performance gaps.
+- Form a hypothesis-driven change (prompt, analyst, calibration, or risk tweak) without rewriting the core framework.
+- Iterate via `src/tools/agent_iteration.py`: apply the change, run the TSLA smoke test (`poetry run python src/main.py --model-provider azure --analysts-all --tickers TSLA`), follow with targeted pytest, and auto-revert on failure.
+- Validate improvements through paired backtests launched with the experiment scheduler, recording results in `log/backtest.csv` and `TODO.md`.
+- Document outcomes, risks, and next hypotheses so the automation loop can resume seamlessly.
+
+### Additional Guardrails
+- Keep evaluation windows post-2020; use ~3-day windows for smoke tests and reserve multi-week ranges for deeper studies with ample timeout budgets.
+- Avoid shell `timeout`; rely on scheduler or Codex timeouts instead.
+- Always route runs through the Azure provider; treat missing `OPENAI_API_KEY` errors as bugs to fix.
+- Capture digestible logs for every backtest and append them to the ledger before proceeding.
+- Focus effort on prompts, calibrations, and diagnostics—leave the framework architecture intact.

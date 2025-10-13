@@ -121,9 +121,7 @@ def _to_dataframe(snapshots: list[Snapshot]) -> pd.DataFrame:
     if {"probability", "raw_probability"}.issubset(df.columns):
         df["boost_delta_check"] = df["probability"] - df["raw_probability"]
     if {"improvement_threshold", "improvement_threshold_effective"}.issubset(df.columns):
-        df["improvement_threshold_reduction"] = (
-            df["improvement_threshold"] - df["improvement_threshold_effective"]
-        )
+        df["improvement_threshold_reduction"] = df["improvement_threshold"] - df["improvement_threshold_effective"]
     if {"improvement", "improvement_threshold_effective"}.issubset(df.columns):
         df["improvement_margin"] = df["improvement"] - df["improvement_threshold_effective"]
     return df

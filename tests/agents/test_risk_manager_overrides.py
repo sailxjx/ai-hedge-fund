@@ -60,12 +60,8 @@ def test_crash_allocator_target_short_overrides_event_bias(monkeypatch):
             "start_date": "2024-01-01",
             "end_date": "2024-03-01",
             "analyst_signals": {
-                "event_catalyst_agent": {
-                    "TSLA": {"signal": "bullish", "constraints": {"preferred_direction": "long"}}
-                },
-                "macro_volatility_sentinel_agent": {
-                    "TSLA": {"signal": "crash_alert", "constraints": {}, "metrics": {"close": 150.0}, "score": 0.9}
-                },
+                "event_catalyst_agent": {"TSLA": {"signal": "bullish", "constraints": {"preferred_direction": "long"}}},
+                "macro_volatility_sentinel_agent": {"TSLA": {"signal": "crash_alert", "constraints": {}, "metrics": {"close": 150.0}, "score": 0.9}},
                 "downside_flow_sentinel_agent": {
                     "TSLA": {"signal": "downside_trend", "constraints": {}},
                 },
@@ -88,9 +84,7 @@ def test_crash_allocator_target_short_overrides_event_bias(monkeypatch):
                 "breakout_cover_sentinel_agent": {"TSLA": {"constraints": {}}},
                 "regime_meta_agent": {"TSLA": {"constraints": {}, "indicators": {"probabilities": {"rally": 0.3, "crash": 0.6}}}},
                 "momentum_guardian_agent": {"TSLA": {"constraints": {}}},
-                "trend_regime_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 72, "constraints": {}}
-                },
+                "trend_regime_agent": {"TSLA": {"signal": "bearish", "confidence": 72, "constraints": {}}},
                 "growth_momentum_agent": {
                     "TSLA": {
                         "constraints": {},
@@ -203,9 +197,7 @@ def test_crash_allocator_overrides_long_vote_blocks(monkeypatch):
                         "constraints": {},
                     }
                 },
-                "macro_volatility_sentinel_agent": {
-                    "NVDA": {"signal": "watch", "constraints": {}}
-                },
+                "macro_volatility_sentinel_agent": {"NVDA": {"signal": "watch", "constraints": {}}},
                 "short_squeeze_guardian_agent": {"NVDA": {"constraints": {}}},
                 "short_cover_classifier_agent": {"NVDA": {"constraints": {}}},
                 "breakout_cover_sentinel_agent": {"NVDA": {"constraints": {}}},
@@ -432,12 +424,8 @@ def test_force_cover_clamps_target_short(monkeypatch):
                         "indicators": {"prob_revert_up": 0.45},
                     }
                 },
-                "macro_volatility_sentinel_agent": {
-                    "NVDA": {"signal": "watch", "constraints": {}}
-                },
-                "downside_flow_sentinel_agent": {
-                    "NVDA": {"signal": "neutral", "constraints": {}}
-                },
+                "macro_volatility_sentinel_agent": {"NVDA": {"signal": "watch", "constraints": {}}},
+                "downside_flow_sentinel_agent": {"NVDA": {"signal": "neutral", "constraints": {}}},
                 "short_cover_classifier_agent": {"NVDA": {"constraints": {}}},
                 "breakout_cover_sentinel_agent": {"NVDA": {"constraints": {}}},
                 "range_recovery_sentinel_agent": {"NVDA": {"constraints": {}}},
@@ -511,12 +499,8 @@ def test_crash_override_ignores_directional_zero_targets(monkeypatch):
                         },
                     }
                 },
-                "downside_flow_sentinel_agent": {
-                    "NVDA": {"signal": "crash_flow", "constraints": {}}
-                },
-                "macro_volatility_sentinel_agent": {
-                    "NVDA": {"signal": "crash_alert", "constraints": {}}
-                },
+                "downside_flow_sentinel_agent": {"NVDA": {"signal": "crash_flow", "constraints": {}}},
+                "macro_volatility_sentinel_agent": {"NVDA": {"signal": "crash_alert", "constraints": {}}},
                 "short_squeeze_guardian_agent": {"NVDA": {"constraints": {}}},
                 "short_cover_classifier_agent": {"NVDA": {"constraints": {}}},
                 "breakout_cover_sentinel_agent": {"NVDA": {"constraints": {}}},
@@ -800,6 +784,7 @@ def test_event_catalyst_preferred_direction_respected(monkeypatch):
     result = risk_management_agent(state)
     payload = result["data"]["analyst_signals"]["risk_management_agent"]["TSLA"]
     notes = payload.get("reasoning", {}).get("constraints", [])
+    overrides = payload.get("overrides") or {}
 
     assert overrides.get("preferred_direction") == "long"
     assert overrides.get("block_new_shorts") is True
@@ -871,10 +856,7 @@ def test_risk_limit_caps_crash_allocator_targets(monkeypatch):
     assert overrides.get("max_additional_short_shares") == expected_cap_shares
 
     notes = payload.get("reasoning", {}).get("constraints", [])
-    assert any(
-        "risk limit caps" in note.lower() or "short target trimmed" in note.lower()
-        for note in notes
-    )
+    assert any("risk limit caps" in note.lower() or "short target trimmed" in note.lower() for note in notes)
 
 
 def test_range_recovery_constraints_drive_short_trim(monkeypatch):
@@ -977,18 +959,14 @@ def test_max_short_cap_preserves_long_limit(monkeypatch):
                 },
                 "short_squeeze_guardian_agent": {"TSLA": {"constraints": {}}},
                 "momentum_guardian_agent": {"TSLA": {"constraints": {}}},
-                "trend_regime_agent": {
-                    "TSLA": {"constraints": {"preferred_direction": "long"}, "confidence": 72}
-                },
+                "trend_regime_agent": {"TSLA": {"constraints": {"preferred_direction": "long"}, "confidence": 72}},
                 "growth_momentum_agent": {
                     "TSLA": {
                         "constraints": {},
                         "indicators": {"prob_up": 0.62, "base_rate": 0.5},
                     }
                 },
-                "stat_mean_reversion_agent": {
-                    "TSLA": {"constraints": {}, "indicators": {"prob_revert_up": 0.4}}
-                },
+                "stat_mean_reversion_agent": {"TSLA": {"constraints": {}, "indicators": {"prob_revert_up": 0.4}}},
                 "regime_meta_agent": {"TSLA": {"constraints": {}, "indicators": {}}},
                 "downside_flow_sentinel_agent": {"TSLA": {"constraints": {}}},
                 "crash_short_allocator_agent": {"TSLA": {"constraints": {}}},
@@ -1037,9 +1015,7 @@ def test_event_catalyst_limits_long_allocation_and_shorts(monkeypatch):
             "end_date": "2024-03-01",
             "analyst_signals": {
                 "short_squeeze_guardian_agent": {"TSLA": {"constraints": {}}},
-                "momentum_guardian_agent": {
-                    "TSLA": {"constraints": {"target_long_shares": 180}, "confidence": 60}
-                },
+                "momentum_guardian_agent": {"TSLA": {"constraints": {"target_long_shares": 180}, "confidence": 60}},
                 "trend_regime_agent": {"TSLA": {"constraints": {}}},
                 "growth_momentum_agent": {"TSLA": {"constraints": {}, "indicators": {}}},
                 "stat_mean_reversion_agent": {"TSLA": {"constraints": {}, "indicators": {}}},
@@ -1094,9 +1070,7 @@ def test_volatility_sentinel_blocks_long_adds(monkeypatch):
             "end_date": "2024-03-01",
             "analyst_signals": {
                 "short_squeeze_guardian_agent": {"TSLA": {"constraints": {}}},
-                "momentum_guardian_agent": {
-                    "TSLA": {"constraints": {"target_long_shares": 180}, "confidence": 70}
-                },
+                "momentum_guardian_agent": {"TSLA": {"constraints": {"target_long_shares": 180}, "confidence": 70}},
                 "trend_regime_agent": {"TSLA": {"constraints": {}}},
                 "growth_momentum_agent": {"TSLA": {"constraints": {}, "indicators": {}}},
                 "stat_mean_reversion_agent": {"TSLA": {"constraints": {}, "indicators": {}}},
@@ -1481,6 +1455,7 @@ def test_risk_manager_honors_short_cover_force_unwind(monkeypatch):
     assert overrides.get("target_short_shares") == 0
     assert overrides.get("block_new_shorts") is True
 
+
 def test_crash_mode_relaxes_short_squeeze_after_streak(monkeypatch):
     series = _build_price_series()
 
@@ -1607,10 +1582,8 @@ def test_short_target_never_exceeds_short_capacity(monkeypatch):
                         "constraints": {"preferred_direction": "short"},
                     }
                 },
-                "macro_volatility_sentinel_agent": {
-                    "TSLA": {"signal": "watch", "constraints": {}}},
-                "downside_flow_sentinel_agent": {
-                    "TSLA": {"signal": "idle", "constraints": {}}},
+                "macro_volatility_sentinel_agent": {"TSLA": {"signal": "watch", "constraints": {}}},
+                "downside_flow_sentinel_agent": {"TSLA": {"signal": "idle", "constraints": {}}},
                 "crash_short_allocator_agent": {
                     "TSLA": {
                         "signal": "crash_short",
@@ -1623,14 +1596,10 @@ def test_short_target_never_exceeds_short_capacity(monkeypatch):
                         },
                     }
                 },
-                "short_squeeze_guardian_agent": {
-                    "TSLA": {"constraints": {"block_new_shorts": False}}
-                },
+                "short_squeeze_guardian_agent": {"TSLA": {"constraints": {"block_new_shorts": False}}},
                 "short_cover_classifier_agent": {"TSLA": {"constraints": {}}},
                 "breakout_cover_sentinel_agent": {"TSLA": {"constraints": {}}},
-                "range_recovery_sentinel_agent": {
-                    "TSLA": {"constraints": {"max_additional_short_shares": 6}}
-                },
+                "range_recovery_sentinel_agent": {"TSLA": {"constraints": {"max_additional_short_shares": 6}}},
                 "regime_meta_agent": {
                     "TSLA": {
                         "constraints": {},
@@ -1662,8 +1631,7 @@ def test_short_target_never_exceeds_short_capacity(monkeypatch):
                         "indicators": {"prob_up": 0.51, "base_rate": 0.5},
                     }
                 },
-                "stat_mean_reversion_agent": {
-                    "TSLA": {"constraints": {}, "indicators": {}}},
+                "stat_mean_reversion_agent": {"TSLA": {"constraints": {}, "indicators": {}}},
                 "stop_loss_guardian_agent": {"TSLA": {"constraints": {}}},
             },
         },
@@ -1671,11 +1639,7 @@ def test_short_target_never_exceeds_short_capacity(monkeypatch):
     }
 
     result = risk_management_agent(state)
-    overrides = (
-        result["data"]["analyst_signals"]["risk_management_agent"]["TSLA"]
-        .get("overrides")
-        or {}
-    )
+    overrides = result["data"]["analyst_signals"]["risk_management_agent"]["TSLA"].get("overrides") or {}
 
     existing_short = state["data"]["portfolio"]["positions"]["TSLA"].get("short", 0)
     target = overrides.get("target_short_shares")
@@ -1683,6 +1647,7 @@ def test_short_target_never_exceeds_short_capacity(monkeypatch):
 
     if isinstance(target, int) and isinstance(max_additional, int):
         assert target <= existing_short + max_additional
+
 
 def test_bearish_consensus_relaxes_directional_blocks(monkeypatch):
     series = _build_price_series()
@@ -1706,24 +1671,12 @@ def test_bearish_consensus_relaxes_directional_blocks(monkeypatch):
             "start_date": "2025-08-01",
             "end_date": "2025-09-12",
             "analyst_signals": {
-                "aswath_damodaran_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 88}
-                },
-                "ben_graham_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 84}
-                },
-                "michael_burry_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 82}
-                },
-                "charlie_munger_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 80}
-                },
-                "technical_analyst_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 72}
-                },
-                "stat_mean_reversion_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 70, "constraints": {}}
-                },
+                "aswath_damodaran_agent": {"TSLA": {"signal": "bearish", "confidence": 88}},
+                "ben_graham_agent": {"TSLA": {"signal": "bearish", "confidence": 84}},
+                "michael_burry_agent": {"TSLA": {"signal": "bearish", "confidence": 82}},
+                "charlie_munger_agent": {"TSLA": {"signal": "bearish", "confidence": 80}},
+                "technical_analyst_agent": {"TSLA": {"signal": "bearish", "confidence": 72}},
+                "stat_mean_reversion_agent": {"TSLA": {"signal": "bearish", "confidence": 70, "constraints": {}}},
                 "momentum_guardian_agent": {
                     "TSLA": {
                         "signal": "bullish_momentum",
@@ -1840,21 +1793,11 @@ def test_short_cover_near_trigger_preserves_short_block(monkeypatch):
             "start_date": "2025-09-01",
             "end_date": "2025-09-10",
             "analyst_signals": {
-                "aswath_damodaran_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 88}
-                },
-                "ben_graham_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 84}
-                },
-                "michael_burry_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 82}
-                },
-                "charlie_munger_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 78}
-                },
-                "technical_analyst_agent": {
-                    "TSLA": {"signal": "bearish", "confidence": 72}
-                },
+                "aswath_damodaran_agent": {"TSLA": {"signal": "bearish", "confidence": 88}},
+                "ben_graham_agent": {"TSLA": {"signal": "bearish", "confidence": 84}},
+                "michael_burry_agent": {"TSLA": {"signal": "bearish", "confidence": 82}},
+                "charlie_munger_agent": {"TSLA": {"signal": "bearish", "confidence": 78}},
+                "technical_analyst_agent": {"TSLA": {"signal": "bearish", "confidence": 72}},
                 "short_cover_classifier_agent": {
                     "TSLA": {
                         "signal": "bias_long",
@@ -1978,9 +1921,7 @@ def test_bearish_fundamental_stack_relaxes_bullish_trend_short_block(monkeypatch
                         "constraints": {"preferred_direction": "long"},
                     }
                 },
-                "momentum_guardian_agent": {
-                    "TSLA": {"signal": "bullish", "confidence": 68, "constraints": {}}
-                },
+                "momentum_guardian_agent": {"TSLA": {"signal": "bullish", "confidence": 68, "constraints": {}}},
                 "growth_momentum_agent": {
                     "TSLA": {
                         "signal": "neutral",
@@ -2010,9 +1951,7 @@ def test_bearish_fundamental_stack_relaxes_bullish_trend_short_block(monkeypatch
                 "short_cover_classifier_agent": {"TSLA": {"constraints": {}}},
                 "breakout_cover_sentinel_agent": {"TSLA": {"constraints": {}}},
                 "range_recovery_sentinel_agent": {"TSLA": {"constraints": {}}},
-                "crash_short_allocator_agent": {
-                    "TSLA": {"signal": "neutral", "confidence": 35, "constraints": {}}
-                },
+                "crash_short_allocator_agent": {"TSLA": {"signal": "neutral", "confidence": 35, "constraints": {}}},
                 "stop_loss_guardian_agent": {"TSLA": {"constraints": {}}},
             },
         },
@@ -2027,10 +1966,7 @@ def test_bearish_fundamental_stack_relaxes_bullish_trend_short_block(monkeypatch
     assert not overrides.get("block_new_shorts")
     max_additional_short = overrides.get("max_additional_short_shares")
     assert max_additional_short is None or max_additional_short != 0
-    assert (
-        "Bearish fundamentals + catalyst stack override bullish trend short block"
-        in constraint_notes
-    )
+    assert "Bearish fundamentals + catalyst stack override bullish trend short block" in constraint_notes
 
 
 def test_short_cover_caution_unblock_reblocked_by_trend(monkeypatch):

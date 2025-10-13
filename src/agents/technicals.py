@@ -1,26 +1,30 @@
+import asyncio
+import json
 import math
 
+import numpy as np
+import pandas as pd
 from langchain_core.messages import HumanMessage
 
+from src.agents.persona_utils import (
+    async_persona_from_observations,
+    persona_from_observations,
+)
 from src.graph.state import AgentState, show_agent_reasoning
-from src.agents.persona_utils import persona_from_observations
+from src.tools.api import get_prices, get_prices_async, prices_to_df
 from src.utils.api_key import get_api_key_from_state
-import json
-import pandas as pd
-import numpy as np
-
-from src.tools.api import get_prices, prices_to_df
+from src.utils.async_state import update_analyst_signals_async
 from src.utils.progress import progress
 
 
 def safe_float(value, default=0.0):
     """
     Safely convert a value to float, handling NaN cases
-    
+
     Args:
         value: The value to convert (can be pandas scalar, numpy value, etc.)
         default: Default value to return if the input is NaN or invalid
-    
+
     Returns:
         float: The converted value or default if NaN/invalid
     """
@@ -53,18 +57,16 @@ def confidence_to_pct(value, default=0.0):
     return int(round(sanitized * 100))
 
 
-
 PERSONA_NAME = "Rhea"
 PERSONA_ROLE = "a chartist persona weaving technical composites into trading guidance"
-PERSONA_BACKSTORY = (
-    "Rhea ran a technical macro book and now translates ensemble signals into actionable tilts."
-)
+PERSONA_BACKSTORY = "Rhea ran a technical macro book and now translates ensemble signals into actionable tilts."
 PERSONA_INSTRUCTIONS = (
     "Review every component observation and craft the technical stance directly from those inputs.",
     "Do not rely on predefined rule thresholds; reason from the raw momentum, trend, and volatility evidence.",
     "Explain the call in first person, referencing the observations that matter most and any conflicts.",
 )
 ALLOWED_SIGNALS = ["bullish", "bearish", "neutral"]
+
 
 ##### Technical Analyst #####
 def technical_analyst_agent(state: AgentState, agent_id: str = "technical_analyst_agent"):
@@ -195,6 +197,126 @@ def technical_analyst_agent(state: AgentState, agent_id: str = "technical_analys
 
     # Add the signal to the analyst_signals list
     state["data"]["analyst_signals"][agent_id] = technical_analysis
+
+    progress.update_status(agent_id, None, "Done")
+
+
+async def technical_analyst_agent_async(state: AgentState, agent_id: str = "technical_analyst_agent"):
+    """Async technical analyst leveraging observation personas."""
+    data = state["data"]
+    start_date = data["start_date"]
+    end_date = data["end_date"]
+    tickers = data["tickers"]
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+    technical_analysis = {}
+
+    for ticker in tickers:
+        progress.update_status(agent_id, ticker, "Analyzing price data")
+
+        prices = await get_prices_async(
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            api_key=api_key,
+        )
+
+        if not prices:
+            progress.update_status(agent_id, ticker, "Failed: No price data found")
+            continue
+
+        prices_df = prices_to_df(prices)
+
+        progress.update_status(agent_id, ticker, "Calculating trend signals")
+        trend_signals = calculate_trend_signals(prices_df)
+
+        progress.update_status(agent_id, ticker, "Calculating mean reversion")
+        mean_reversion_signals = calculate_mean_reversion_signals(prices_df)
+
+        progress.update_status(agent_id, ticker, "Calculating momentum")
+        momentum_signals = calculate_momentum_signals(prices_df)
+
+        progress.update_status(agent_id, ticker, "Analyzing volatility")
+        volatility_signals = calculate_volatility_signals(prices_df)
+
+        progress.update_status(agent_id, ticker, "Statistical analysis")
+        stat_arb_signals = calculate_stat_arb_signals(prices_df)
+
+        components = {
+            "trend_following": {
+                "signal": trend_signals["signal"],
+                "confidence": confidence_to_pct(trend_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(trend_signals["metrics"]),
+            },
+            "mean_reversion": {
+                "signal": mean_reversion_signals["signal"],
+                "confidence": confidence_to_pct(mean_reversion_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(mean_reversion_signals["metrics"]),
+            },
+            "momentum": {
+                "signal": momentum_signals["signal"],
+                "confidence": confidence_to_pct(momentum_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(momentum_signals["metrics"]),
+            },
+            "volatility": {
+                "signal": volatility_signals["signal"],
+                "confidence": confidence_to_pct(volatility_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(volatility_signals["metrics"]),
+            },
+            "statistical_arbitrage": {
+                "signal": stat_arb_signals["signal"],
+                "confidence": confidence_to_pct(stat_arb_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(stat_arb_signals["metrics"]),
+            },
+        }
+
+        observations = {
+            "ticker": ticker,
+            "component_signals": components,
+            "price_context": {
+                "latest_close": safe_float(prices_df["close"].iloc[-1]),
+                "lookback_days": int(len(prices_df)),
+            },
+        }
+
+        decision = await async_persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="neutral",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to neutral after missing persona output.",
+        )
+
+        confidence = int(max(0, min(round(decision.confidence), 100)))
+        constraints = decision.constraints or {}
+        payload = {
+            "signal": decision.signal,
+            "confidence": confidence,
+            "reasoning": decision.reasoning,
+            "constraints": constraints,
+            "components": components,
+            "meta": {
+                "observations": observations,
+            },
+        }
+
+        technical_analysis[ticker] = payload
+        progress.update_status(agent_id, ticker, "Done", analysis=json.dumps(payload, indent=4))
+
+    message = HumanMessage(
+        content=json.dumps(technical_analysis),
+        name=agent_id,
+    )
+
+    if state["metadata"]["show_reasoning"]:
+        show_agent_reasoning(technical_analysis, "Technical Analyst")
+
+    await update_analyst_signals_async(state, agent_id, technical_analysis)
 
     progress.update_status(agent_id, None, "Done")
 

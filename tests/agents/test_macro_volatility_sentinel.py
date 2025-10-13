@@ -48,27 +48,31 @@ def _base_state(long_shares: int = 0) -> dict:
     }
 
 
-def _persona_passthrough(**kwargs):
-    default = kwargs.get("default_decision", {})
-    constraints = default.get("constraints")
-    fallback_constraints = constraints if isinstance(constraints, dict) else {}
-    return PersonaDecision(
-        signal=str(default.get("signal", "neutral")),
-        confidence=float(default.get("confidence", 0)),
-        reasoning=str(default.get("reasoning", "")),
-        constraints=fallback_constraints,
-    )
+def _persona_stub_factory(signal: str, confidence: float = 75.0, constraints: dict | None = None):
+    captured: dict[str, dict] = {}
+
+    def _stub(*, observations=None, **_):
+        nonlocal captured
+        captured["observations"] = observations or {}
+        return PersonaDecision(
+            signal=signal,
+            confidence=confidence,
+            reasoning=f"Stubbed {signal} decision",
+            constraints=constraints or {},
+        )
+
+    return captured, _stub
 
 
 def test_crash_alert_blocks_long_adds(monkeypatch):
     prices = _build_price_series()
-    monkeypatch.setattr(
-        "src.agents.macro_volatility_sentinel.get_prices", lambda *_, **__: prices
+    monkeypatch.setattr("src.agents.macro_volatility_sentinel.get_prices", lambda *_, **__: prices)
+    captured, persona_stub = _persona_stub_factory(
+        signal="crash_alert",
+        confidence=88.0,
+        constraints={"preferred_direction": "short", "max_long_exposure_pct": 0.05},
     )
-    monkeypatch.setattr(
-        "src.agents.macro_volatility_sentinel.invoke_persona",
-        _persona_passthrough
-    )
+    monkeypatch.setattr("src.agents.macro_volatility_sentinel.persona_from_observations", persona_stub)
 
     features = {
         "close": 310.0,
@@ -92,23 +96,26 @@ def test_crash_alert_blocks_long_adds(monkeypatch):
     payload = result["data"]["analyst_signals"]["macro_volatility_sentinel_agent"]["TSLA"]
 
     assert payload["signal"] == "crash_alert"
-    assert payload["confidence"] >= 75
-    constraints = payload["constraints"]
-    assert constraints.get("preferred_direction") == "short"
-    assert constraints.get("max_additional_long_shares") == 0
-    assert constraints.get("max_long_exposure_pct") == 0.05
-    assert constraints.get("max_long_shares") == 60
+    assert payload["confidence"] == 88
+    assert payload["constraints"] == {"preferred_direction": "short", "max_long_exposure_pct": 0.05}
+    assert "score" not in payload
+
+    observations = captured["observations"]
+    assert observations["data_status"] == "data_ready"
+    assert "auto_signal_hint" not in observations
+    assert observations["volatility_features"] == features
+    assert observations["diagnostic_notes"]
 
 
 def test_vol_watch_limits_adds(monkeypatch):
     prices = _build_price_series()
-    monkeypatch.setattr(
-        "src.agents.macro_volatility_sentinel.get_prices", lambda *_, **__: prices
+    monkeypatch.setattr("src.agents.macro_volatility_sentinel.get_prices", lambda *_, **__: prices)
+    captured, persona_stub = _persona_stub_factory(
+        signal="vol_watch",
+        confidence=67.0,
+        constraints={"max_long_exposure_pct": 0.12},
     )
-    monkeypatch.setattr(
-        "src.agents.macro_volatility_sentinel.invoke_persona",
-        _persona_passthrough
-    )
+    monkeypatch.setattr("src.agents.macro_volatility_sentinel.persona_from_observations", persona_stub)
 
     features = {
         "close": 280.0,
@@ -132,21 +139,21 @@ def test_vol_watch_limits_adds(monkeypatch):
     payload = result["data"]["analyst_signals"]["macro_volatility_sentinel_agent"]["TSLA"]
 
     assert payload["signal"] == "vol_watch"
-    constraints = payload["constraints"]
-    assert constraints.get("max_long_exposure_pct") == 0.10
-    assert constraints.get("max_additional_long_shares") == 20
-    assert constraints.get("preferred_direction") is None or constraints.get("preferred_direction") != "short"
+    assert payload["confidence"] == 67
+    assert payload["constraints"] == {"max_long_exposure_pct": 0.12}
+    assert "score" not in payload
+
+    observations = captured["observations"]
+    assert observations["data_status"] == "data_ready"
+    assert observations["volatility_features"] == features
+    assert "auto_confidence_hint" not in observations
 
 
 def test_calm_mode_sets_baseline_cap(monkeypatch):
     prices = _build_price_series()
-    monkeypatch.setattr(
-        "src.agents.macro_volatility_sentinel.get_prices", lambda *_, **__: prices
-    )
-    monkeypatch.setattr(
-        "src.agents.macro_volatility_sentinel.invoke_persona",
-        _persona_passthrough
-    )
+    monkeypatch.setattr("src.agents.macro_volatility_sentinel.get_prices", lambda *_, **__: prices)
+    captured, persona_stub = _persona_stub_factory(signal="calm", confidence=42.0)
+    monkeypatch.setattr("src.agents.macro_volatility_sentinel.persona_from_observations", persona_stub)
 
     features = {
         "close": 260.0,
@@ -170,6 +177,11 @@ def test_calm_mode_sets_baseline_cap(monkeypatch):
     payload = result["data"]["analyst_signals"]["macro_volatility_sentinel_agent"]["TSLA"]
 
     assert payload["signal"] == "calm"
-    assert payload["constraints"].get("max_long_exposure_pct") == 0.18
-    assert payload["confidence"] <= 50
+    assert payload["confidence"] == 42
+    assert payload["constraints"] == {}
+    assert "score" not in payload
 
+    observations = captured["observations"]
+    assert observations["data_status"] == "data_ready"
+    assert observations["volatility_features"] == features
+    assert observations["diagnostic_notes"]

@@ -11,15 +11,17 @@ def _build_values(values: list[float]):
     start = datetime(2024, 1, 1)
     points = []
     for i, v in enumerate(values):
-        points.append({
-            "Date": start + timedelta(days=i),
-            "Portfolio Value": v,
-            "Long Exposure": 0.0,
-            "Short Exposure": 0.0,
-            "Gross Exposure": 0.0,
-            "Net Exposure": 0.0,
-            "Long/Short Ratio": np.inf,
-        })
+        points.append(
+            {
+                "Date": start + timedelta(days=i),
+                "Portfolio Value": v,
+                "Long Exposure": 0.0,
+                "Short Exposure": 0.0,
+                "Gross Exposure": 0.0,
+                "Net Exposure": 0.0,
+                "Long/Short Ratio": np.inf,
+            }
+        )
     return points
 
 
@@ -27,10 +29,12 @@ def _build_benchmark(values: list[float]):
     start = datetime(2024, 1, 1)
     points = []
     for i, v in enumerate(values):
-        points.append({
-            "Date": start + timedelta(days=i),
-            "Benchmark Value": v,
-        })
+        points.append(
+            {
+                "Date": start + timedelta(days=i),
+                "Benchmark Value": v,
+            }
+        )
     return points
 
 
@@ -77,9 +81,7 @@ def test_information_ratio_with_benchmark():
     df = pd.DataFrame(portfolio_vals).set_index("Date")
     df["Daily Return"] = df["Portfolio Value"].pct_change()
     bench_df = pd.DataFrame(benchmark_vals).set_index("Date").reindex(df.index).ffill()
-    combined = pd.concat(
-        [df["Daily Return"], bench_df["Benchmark Value"].pct_change()], axis=1
-    ).dropna()
+    combined = pd.concat([df["Daily Return"], bench_df["Benchmark Value"].pct_change()], axis=1).dropna()
     combined.columns = ["portfolio", "benchmark"]
     active = combined["portfolio"] - combined["benchmark"]
     expected_info = np.sqrt(2) * (active.mean() / active.std())

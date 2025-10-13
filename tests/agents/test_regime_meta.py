@@ -3,8 +3,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from src.agents.regime_meta import regime_meta_agent
 from src.agents.persona_utils import PersonaDecision
+from src.agents.regime_meta import regime_meta_agent
 from src.data.models import Price
 
 
@@ -79,14 +79,14 @@ def test_regime_meta_pushes_long_bias(monkeypatch):
 
     result = regime_meta_agent(state)
     payload = result["data"]["analyst_signals"]["regime_meta_agent"]["TSLA"]
+    layers = payload["indicators"]["probability_layers"]
+    blended = layers["blended"]
+    model_reference = payload["indicators"]["model_reference"]
 
-    assert payload["signal"] == "rally"
-    assert payload["confidence"] >= 60
-
-    constraints = payload.get("constraints") or {}
-    assert constraints.get("preferred_direction") == "long"
-    assert constraints.get("max_short_exposure_pct") <= 0.05
-    assert constraints.get("target_long_shares", 0) > 0
+    assert blended["rally"] > blended["crash"]
+    assert blended["rally"] > blended["consolidation"]
+    assert model_reference["signal"] == "rally"
+    assert model_reference["confidence_pct"] >= 60
 
 
 def test_regime_meta_flags_crash(monkeypatch):
@@ -121,11 +121,13 @@ def test_regime_meta_flags_crash(monkeypatch):
 
     result = regime_meta_agent(state)
     payload = result["data"]["analyst_signals"]["regime_meta_agent"]["TSLA"]
+    layers = payload["indicators"]["probability_layers"]
+    blended = layers["blended"]
+    model_reference = payload["indicators"]["model_reference"]
 
-    assert payload["signal"] == "crash"
-    constraints = payload.get("constraints") or {}
-    assert constraints.get("preferred_direction") == "short"
-    assert constraints.get("max_short_exposure_pct", 0) >= 0.15
+    assert blended["crash"] > blended["rally"]
+    assert blended["crash"] > blended["consolidation"]
+    assert model_reference["signal"] == "crash"
 
 
 def test_probabilities_use_calibration(tmp_path, monkeypatch):
@@ -268,6 +270,8 @@ def test_downside_flow_requires_feature_alignment(monkeypatch):
     )
 
     assert gated["crash"] == pytest.approx(baseline["crash"])
+
+
 def test_target_long_shares_respects_low_cash(monkeypatch):
     rally_values = [500 * (1.0015) ** i for i in range(90)]
     prices = _build_price_series(rally_values)
@@ -288,10 +292,12 @@ def test_target_long_shares_respects_low_cash(monkeypatch):
 
     result = regime_meta_agent(state)
     payload = result["data"]["analyst_signals"]["regime_meta_agent"]["TSLA"]
-    constraints = payload.get("constraints") or {}
-
+    model_reference = payload["indicators"]["model_reference"]
     assert payload["signal"] == "rally"
-    assert "target_long_shares" not in constraints
+    assert model_reference["signal"] == "rally"
+    # No deterministic constraints are produced; persona (or downstream logic) must decide sizing.
+    constraints = payload.get("constraints") or {}
+    assert constraints == {}
 
 
 def test_target_long_shares_caps_fractional_cash(monkeypatch):
@@ -320,13 +326,35 @@ def test_target_long_shares_caps_fractional_cash(monkeypatch):
 
     result = regime_meta_agent(state)
     payload = result["data"]["analyst_signals"]["regime_meta_agent"]["TSLA"]
-    constraints = payload.get("constraints") or {}
-
+    model_reference = payload["indicators"]["model_reference"]
     assert payload["signal"] == "rally"
+    assert model_reference["signal"] == "rally"
 
-    target_shares = constraints.get("target_long_shares")
-    assert target_shares is not None
+    # Constraints are left to the persona/portfolio manager under the new observation-only design.
+    constraints = payload.get("constraints") or {}
+    assert constraints == {}
 
-    snapshot_price = prices[-1].close
-    max_additional = int((state["data"]["portfolio"]["cash"] * 0.4) // snapshot_price)
-    assert target_shares - 1500 <= max_additional
+
+def _persona_passthrough(*, observations=None, default_signal="monitor", default_confidence=0.0, default_reasoning="", **_):
+    observations = observations or {}
+    model_reference = observations.get("model_reference") or {}
+    signal = model_reference.get("signal", default_signal)
+    confidence = model_reference.get("confidence_pct", default_confidence)
+    reasoning = model_reference.get("reasoning", default_reasoning)
+    constraints = observations.get("suggested_constraints")
+    if not isinstance(constraints, dict):
+        constraints = {}
+    return PersonaDecision(
+        signal=str(signal),
+        confidence=float(confidence),
+        reasoning=str(reasoning),
+        constraints=constraints,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _patch_persona(monkeypatch):
+    monkeypatch.setattr(
+        "src.agents.regime_meta.persona_from_observations",
+        _persona_passthrough,
+    )

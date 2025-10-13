@@ -50,16 +50,40 @@ def _base_state(short_shares: int = 0):
     }
 
 
+def _persona_stub_factory(signal: str, confidence: float, constraints: dict | None = None):
+    captured: dict[str, dict] = {}
+
+    def _stub(*, observations=None, **_):
+        nonlocal captured
+        captured["observations"] = observations or {}
+        return PersonaDecision(
+            signal=signal,
+            confidence=confidence,
+            reasoning=f"Stubbed {signal} decision",
+            constraints=constraints or {},
+        )
+
+    return captured, _stub
+
+
 def test_compression_break_forces_full_cover(monkeypatch):
     prices = _build_prices()
     monkeypatch.setattr(
         "src.agents.range_recovery_sentinel.get_prices",
         lambda *_, **__: prices,
     )
-    monkeypatch.setattr(
-        "src.agents.range_recovery_sentinel.invoke_persona",
-        _persona_passthrough
+    captured, persona_stub = _persona_stub_factory(
+        signal="compression_break",
+        confidence=93.0,
+        constraints={
+            "preferred_direction": "long",
+            "block_new_shorts": True,
+            "allow_short": False,
+            "target_short_shares": 0,
+            "force_cover_qty": 8,
+        },
     )
+    monkeypatch.setattr("src.agents.range_recovery_sentinel.persona_from_observations", persona_stub)
 
     features = {
         "close": 280.0,
@@ -87,12 +111,21 @@ def test_compression_break_forces_full_cover(monkeypatch):
     payload = result["data"]["analyst_signals"]["range_recovery_sentinel_agent"]["TSLA"]
 
     assert payload["signal"] == "compression_break"
-    constraints = payload["constraints"]
-    assert constraints["target_short_shares"] == 0
-    assert constraints["force_cover_qty"] == 8
-    assert constraints["block_new_shorts"] is True
-    assert constraints["allow_short"] is False
-    assert constraints["max_short_exposure_pct"] == 0.0
+    assert payload["confidence"] == 93
+    assert payload["constraints"] == {
+        "preferred_direction": "long",
+        "block_new_shorts": True,
+        "allow_short": False,
+        "target_short_shares": 0,
+        "force_cover_qty": 8,
+    }
+    assert "score" not in payload
+
+    observations = captured["observations"]
+    assert observations["data_status"] == "data_ready"
+    assert observations["existing_short_shares"] == 8
+    assert observations["range_features"] == features
+    assert "auto_signal_hint" not in observations
 
 
 def test_drift_recovery_trims_shorts(monkeypatch):
@@ -101,10 +134,16 @@ def test_drift_recovery_trims_shorts(monkeypatch):
         "src.agents.range_recovery_sentinel.get_prices",
         lambda *_, **__: prices,
     )
-    monkeypatch.setattr(
-        "src.agents.range_recovery_sentinel.invoke_persona",
-        _persona_passthrough
+    captured, persona_stub = _persona_stub_factory(
+        signal="drift_recovery",
+        confidence=76.0,
+        constraints={
+            "block_new_shorts": True,
+            "allow_short": False,
+            "target_short_shares": 3,
+        },
     )
+    monkeypatch.setattr("src.agents.range_recovery_sentinel.persona_from_observations", persona_stub)
 
     features = {
         "close": 265.0,
@@ -132,12 +171,17 @@ def test_drift_recovery_trims_shorts(monkeypatch):
     payload = result["data"]["analyst_signals"]["range_recovery_sentinel_agent"]["TSLA"]
 
     assert payload["signal"] == "drift_recovery"
-    constraints = payload["constraints"]
-    assert constraints["target_short_shares"] == 3
-    assert constraints["force_cover_qty"] == 7
-    assert constraints["block_new_shorts"] is True
-    assert constraints["allow_short"] is False
-    assert constraints["max_short_exposure_pct"] == 0.03
+    assert payload["confidence"] == 76
+    assert payload["constraints"] == {
+        "block_new_shorts": True,
+        "allow_short": False,
+        "target_short_shares": 3,
+    }
+
+    observations = captured["observations"]
+    assert observations["range_features"] == features
+    assert observations["existing_short_shares"] == 10
+    assert observations["diagnostic_notes"]
 
 
 def test_range_monitor_caps_short_bias(monkeypatch):
@@ -146,10 +190,12 @@ def test_range_monitor_caps_short_bias(monkeypatch):
         "src.agents.range_recovery_sentinel.get_prices",
         lambda *_, **__: prices,
     )
-    monkeypatch.setattr(
-        "src.agents.range_recovery_sentinel.invoke_persona",
-        _persona_passthrough
+    captured, persona_stub = _persona_stub_factory(
+        signal="range_monitor",
+        confidence=58.0,
+        constraints={"block_new_shorts": True, "allow_short": False},
     )
+    monkeypatch.setattr("src.agents.range_recovery_sentinel.persona_from_observations", persona_stub)
 
     features = {
         "close": 255.0,
@@ -177,9 +223,11 @@ def test_range_monitor_caps_short_bias(monkeypatch):
     payload = result["data"]["analyst_signals"]["range_recovery_sentinel_agent"]["TSLA"]
 
     assert payload["signal"] == "range_monitor"
-    constraints = payload["constraints"]
-    assert constraints["target_short_shares"] == 3
-    assert constraints["block_new_shorts"] is True
-    assert constraints["allow_short"] is False
-    assert constraints["max_short_exposure_pct"] == 0.05
-    assert "force_cover_qty" not in constraints
+    assert payload["confidence"] == 58
+    assert payload["constraints"] == {"block_new_shorts": True, "allow_short": False}
+    assert "score" not in payload
+
+    observations = captured["observations"]
+    assert observations["range_features"] == features
+    assert observations["existing_short_shares"] == 5
+    assert observations["data_status"] == "data_ready"

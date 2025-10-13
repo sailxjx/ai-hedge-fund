@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import copy
+import json
 import os
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, Sequence
+import time
 from collections import defaultdict
 from contextlib import contextmanager
-import time
-import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Mapping, Sequence
 
 import pandas as pd
 from dateutil.relativedelta import relativedelta
@@ -20,14 +21,16 @@ from src.tools.api import (
     get_price_data,
     get_prices,
 )
+from src.utils.llm import LLM_ASYNC_MAX_CONCURRENCY
+from src.utils.runtime import async_personas_enabled
 
 from .benchmarks import BenchmarkCalculator
 from .controller import AgentController
+from .data_types import PerformanceMetrics, PortfolioSnapshot, PortfolioValuePoint
 from .metrics import PerformanceMetricsCalculator
 from .output import OutputBuilder
 from .portfolio import Portfolio
 from .trader import TradeExecutor
-from .data_types import PerformanceMetrics, PortfolioSnapshot, PortfolioValuePoint
 from .valuation import calculate_portfolio_value, compute_exposures
 
 
@@ -113,15 +116,20 @@ class BacktestEngine:
         self._turnover_value_sum = 0.0
         self._timing_totals: dict[str, float] = defaultdict(float)
         self._timing_counts: dict[str, int] = defaultdict(int)
+        self._agent_timings: dict[str, list[float]] = defaultdict(list)
+        self._agent_updates: dict[str, int] = defaultdict(int)
+        self._async_enabled = async_personas_enabled()
+        self._async_loop: asyncio.AbstractEventLoop | None = None
         self._run_label = self._base_metadata_overrides.get("run_label", "backtest_run")
         timing_dir = Path("log/backtest_timings")
         timing_dir.mkdir(parents=True, exist_ok=True)
         self._timing_log_path = timing_dir / f"{self._run_label}.json"
+        self._timing_summary: dict[str, Any] | None = None
 
     def _build_metadata_overrides(self) -> dict[str, str | bool]:
         tickers_slug = "_".join(self._tickers) if self._tickers else "portfolio"
         window_slug = f"{self._start_date}_to_{self._end_date}".replace("-", "")
-        timestamp_slug = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        timestamp_slug = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_label = f"backtest_{tickers_slug}_{window_slug}_{timestamp_slug}"
         log_path = Path("log/risk_overrides") / f"{run_label}.jsonl"
         overrides = {
@@ -236,6 +244,56 @@ class BacktestEngine:
 
         self._initial_long_applied = True
 
+    def _invoke_trading_agent(
+        self,
+        *,
+        tickers: Sequence[str],
+        start_date: str,
+        end_date: str,
+        metadata_overrides: dict[str, Any] | None,
+    ) -> AgentOutput:
+        controller_kwargs = dict(
+            agent=self._agent,
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            portfolio=self._portfolio,
+            model_name=self._model_name,
+            model_provider=self._model_provider,
+            selected_analysts=self._selected_analysts,
+            metadata_overrides=metadata_overrides,
+        )
+        if self._async_enabled:
+            loop = self._async_loop
+            if loop is None:
+                loop = asyncio.new_event_loop()
+                self._async_loop = loop
+                asyncio.set_event_loop(loop)
+            return loop.run_until_complete(self._agent_controller.run_agent_async(**controller_kwargs))
+        return self._agent_controller.run_agent(**controller_kwargs)
+
+    def _record_agent_timings(self, timings: dict[str, Any] | None) -> None:
+        if not timings:
+            return
+        for agent_name, payload in timings.items():
+            if not isinstance(payload, dict):
+                continue
+            elapsed = payload.get("elapsed_seconds")
+            if elapsed is not None:
+                try:
+                    elapsed_val = float(elapsed)
+                except (TypeError, ValueError):
+                    elapsed_val = None
+                if elapsed_val is not None:
+                    self._agent_timings[agent_name].append(elapsed_val)
+            updates = payload.get("updates")
+            if updates is not None:
+                try:
+                    updates_val = int(updates)
+                except (TypeError, ValueError):
+                    updates_val = 0
+                self._agent_updates[agent_name] += max(0, updates_val)
+
     def run_backtest(self) -> PerformanceMetrics:
         with self._timed("prefetch_data"):
             self._prefetch_data()
@@ -296,17 +354,13 @@ class BacktestEngine:
                 metadata_overrides["risk_manager_state"] = copy.deepcopy(self._risk_manager_state)
 
             with self._timed("agent_invoke"):
-                agent_output = self._agent_controller.run_agent(
-                    self._agent,
+                agent_output = self._invoke_trading_agent(
                     tickers=self._tickers,
                     start_date=lookback_start,
                     end_date=current_date_str,
-                    portfolio=self._portfolio,
-                    model_name=self._model_name,
-                    model_provider=self._model_provider,
-                    selected_analysts=self._selected_analysts,
                     metadata_overrides=metadata_overrides,
                 )
+            self._record_agent_timings(agent_output.get("timings"))
             self._risk_manager_state = copy.deepcopy(agent_output.get("risk_manager_state"))
             decisions = agent_output["decisions"]
 
@@ -403,12 +457,79 @@ class BacktestEngine:
             self._performance_metrics["turnover_rate"] = self._turnover_notional / self._turnover_value_sum
         else:
             self._performance_metrics["turnover_rate"] = 0.0
+        if self._async_loop is not None:
+            self._async_loop.close()
+            asyncio.set_event_loop(None)
+            self._async_loop = None
         self._write_timing_summary()
 
         return self._performance_metrics
 
     def get_portfolio_values(self) -> Sequence[PortfolioValuePoint]:
         return list(self._portfolio_values)
+
+    def get_timing_log_path(self) -> Path:
+        """Return the path where timing summaries are persisted."""
+
+        return self._timing_log_path
+
+    def get_timing_summary(self) -> dict[str, Any] | None:
+        """Return an in-memory copy of the most recent timing summary."""
+
+        if self._timing_summary is not None:
+            return copy.deepcopy(self._timing_summary)
+        if self._timing_log_path.exists():
+            try:
+                payload = json.loads(self._timing_log_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return None
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    def _async_meta_from_summary(self, payload: Mapping[str, Any]) -> dict[str, float | int | None]:
+        """Compute derived async concurrency metrics from a timing summary."""
+
+        per_agent = payload.get("per_agent")
+        if not isinstance(per_agent, Mapping):
+            return {}
+        agent_total = 0.0
+        slowest_avg = 0.0
+        slowest_agent = None
+        for agent_name, stats in per_agent.items():
+            if not isinstance(stats, Mapping):
+                continue
+            total = float(stats.get("total_seconds", 0.0) or 0.0)
+            avg = float(stats.get("avg_seconds", 0.0) or 0.0)
+            agent_total += max(0.0, total)
+            if avg > slowest_avg:
+                slowest_avg = avg
+                slowest_agent = agent_name
+
+        agent_invoke_summary = payload.get("agent_invoke")
+        if isinstance(agent_invoke_summary, Mapping):
+            agent_invoke_total = float(agent_invoke_summary.get("total_seconds", 0.0) or 0.0)
+        else:
+            agent_invoke_total = 0.0
+
+        concurrency_ratio = None
+        if agent_invoke_total > 0.0 and agent_total > 0.0:
+            concurrency_ratio = agent_total / agent_invoke_total
+
+        semaphore_limit = max(int(LLM_ASYNC_MAX_CONCURRENCY or 0), 1)
+        semaphore_utilization = None
+        if concurrency_ratio is not None and semaphore_limit > 0:
+            semaphore_utilization = min(concurrency_ratio / semaphore_limit, 1.0)
+
+        return {
+            "agent_invoke_total_seconds": agent_invoke_total or None,
+            "per_agent_total_seconds": agent_total or None,
+            "aggregate_concurrency": concurrency_ratio,
+            "slowest_agent": slowest_agent,
+            "slowest_agent_avg_seconds": slowest_avg or None,
+            "concurrency_limit": semaphore_limit,
+            "semaphore_utilization": semaphore_utilization,
+        }
 
     def _write_timing_summary(self) -> None:
         if not self._timing_totals:
@@ -422,10 +543,27 @@ class BacktestEngine:
                 "count": count,
                 "avg_seconds": avg,
             }
+        if self._agent_timings:
+            per_agent: dict[str, dict[str, Any]] = {}
+            for agent_name, durations in self._agent_timings.items():
+                total = sum(durations)
+                count = len(durations)
+                avg = total / count if count else 0.0
+                per_agent[agent_name] = {
+                    "total_seconds": total,
+                    "count": count,
+                    "avg_seconds": avg,
+                    "updates": self._agent_updates.get(agent_name, 0),
+                }
+            summary["per_agent"] = per_agent
         summary["_meta"] = {
             "turnover_notional": self._turnover_notional,
             "turnover_value_sum": self._turnover_value_sum,
         }
+        async_meta = self._async_meta_from_summary(summary)
+        if async_meta:
+            summary["async_meta"] = async_meta
+        self._timing_summary = summary
         try:
             self._timing_log_path.parent.mkdir(parents=True, exist_ok=True)
             self._timing_log_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

@@ -24,6 +24,16 @@ from src.tools.llm_backtest_digest import BacktestDigest, parse_backtest_digest
 
 DEFAULT_TIMEOUT_SECONDS = 3600
 BACKTESTER_ENTRYPOINT = Path("src/backtester.py")
+ASYNC_LEDGER_COLUMNS = [
+    "timing_summary_path",
+    "async_agent_invoke_total_seconds",
+    "async_per_agent_total_seconds",
+    "async_concurrency_ratio",
+    "async_semaphore_utilization",
+    "async_slowest_agent",
+    "async_slowest_agent_avg_seconds",
+]
+
 CSV_HEADER = [
     "timestamp",
     "label",
@@ -34,16 +44,18 @@ CSV_HEADER = [
     "prompt_revision",
     "portfolio_return_pct",
     "sharpe_ratio",
+    "sortino_ratio",
     "max_drawdown_pct",
     "information_ratio",
     "benchmark_return_pct",
+    "turnover_rate_pct",
     "hit_rate",
     "log_path",
     "baseline_label",
     "delta_portfolio_return_pct",
     "delta_sharpe_ratio",
     "delta_max_drawdown_pct",
-]
+] + ASYNC_LEDGER_COLUMNS
 
 
 class ExperimentRunError(RuntimeError):
@@ -143,13 +155,79 @@ class Metrics:
 
     portfolio_return_pct: float | None
     sharpe_ratio: float | None
+    sortino_ratio: float | None
     max_drawdown_pct: float | None
     information_ratio: float | None
     benchmark_return_pct: float | None
+    turnover_rate_pct: float | None
 
 
 RunCommand = Callable[[Sequence[str], int], None]
 ParseDigest = Callable[[Path], BacktestDigest]
+
+
+def _timing_slug(experiment: Experiment) -> str:
+    tickers_slug = "_".join(experiment.tickers)
+    window_slug = f"{experiment.start_date}_to_{experiment.end_date}".replace("-", "")
+    return f"backtest_{tickers_slug}_{window_slug}"
+
+
+def _load_json(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _extract_async_telemetry(summary: Mapping[str, object] | None) -> dict[str, object] | None:
+    if not isinstance(summary, Mapping):
+        return None
+    async_meta = summary.get("async_meta")
+    if not isinstance(async_meta, Mapping):
+        return None
+
+    def _coerce(value: object | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    telemetry = {
+        "async_agent_invoke_total_seconds": _coerce(async_meta.get("agent_invoke_total_seconds")),
+        "async_per_agent_total_seconds": _coerce(async_meta.get("per_agent_total_seconds")),
+        "async_concurrency_ratio": _coerce(async_meta.get("aggregate_concurrency")),
+        "async_semaphore_utilization": _coerce(async_meta.get("semaphore_utilization")),
+        "async_slowest_agent": async_meta.get("slowest_agent"),
+        "async_slowest_agent_avg_seconds": _coerce(async_meta.get("slowest_agent_avg_seconds")),
+    }
+    return telemetry
+
+
+def locate_timing_summary(
+    experiment: Experiment,
+    *,
+    timing_dir: Path,
+) -> tuple[Path | None, dict[str, object] | None, dict[str, object] | None]:
+    """Locate the latest timing summary for an experiment."""
+
+    slug = _timing_slug(experiment)
+    if not timing_dir.exists():
+        return None, None, None
+    pattern = f"{slug}_*.json"
+    candidates = sorted(
+        timing_dir.glob(pattern),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
+    )
+    if not candidates:
+        return None, None, None
+    summary_path = candidates[0]
+    summary_payload = _load_json(summary_path)
+    async_telemetry = _extract_async_telemetry(summary_payload)
+    return summary_path, summary_payload, async_telemetry
 
 
 def default_log_path(label: str, start_date: str, end_date: str, *, now: datetime | None = None) -> Path:
@@ -308,9 +386,11 @@ def parse_metrics(digest: BacktestDigest) -> Metrics:
     return Metrics(
         portfolio_return_pct=_coerce(metrics.get("portfolio_return_pct")),
         sharpe_ratio=_coerce(metrics.get("sharpe_ratio")),
+        sortino_ratio=_coerce(metrics.get("sortino_ratio")),
         max_drawdown_pct=_coerce(metrics.get("max_drawdown_pct")),
         information_ratio=_coerce(metrics.get("information_ratio")),
         benchmark_return_pct=_coerce(metrics.get("benchmark_return_pct")),
+        turnover_rate_pct=_coerce(metrics.get("turnover_rate_pct")),
     )
 
 
@@ -341,9 +421,11 @@ def load_baseline_metrics(label: str, csv_path: Path) -> Metrics | None:
     return Metrics(
         portfolio_return_pct=_coerce(latest_row.get("portfolio_return_pct")),
         sharpe_ratio=_coerce(latest_row.get("sharpe_ratio")),
+        sortino_ratio=_coerce(latest_row.get("sortino_ratio")),
         max_drawdown_pct=_coerce(latest_row.get("max_drawdown_pct")),
         information_ratio=_coerce(latest_row.get("information_ratio")),
         benchmark_return_pct=_coerce(latest_row.get("benchmark_return_pct")),
+        turnover_rate_pct=_coerce(latest_row.get("turnover_rate_pct")),
     )
 
 
@@ -368,6 +450,8 @@ def append_ledger_row(
     metrics: Metrics,
     baseline_label: str | None,
     deltas: tuple[float | None, float | None, float | None],
+    timing_summary_path: Path | None = None,
+    async_telemetry: Mapping[str, object] | None = None,
 ) -> None:
     """Append a single backtest record to the ledger CSV."""
 
@@ -383,9 +467,11 @@ def append_ledger_row(
         "prompt_revision": experiment.prompt_revision,
         "portfolio_return_pct": _format_optional(metrics.portfolio_return_pct),
         "sharpe_ratio": _format_optional(metrics.sharpe_ratio),
+        "sortino_ratio": _format_optional(metrics.sortino_ratio),
         "max_drawdown_pct": _format_optional(metrics.max_drawdown_pct),
         "information_ratio": _format_optional(metrics.information_ratio),
         "benchmark_return_pct": _format_optional(metrics.benchmark_return_pct),
+        "turnover_rate_pct": _format_optional(metrics.turnover_rate_pct),
         "hit_rate": experiment.note or "NA",
         "log_path": str(experiment.log_path),
         "baseline_label": baseline_label or "",
@@ -393,6 +479,21 @@ def append_ledger_row(
         "delta_sharpe_ratio": _format_optional(deltas[1]),
         "delta_max_drawdown_pct": _format_optional(deltas[2]),
     }
+    if async_telemetry:
+        row.update(
+            {
+                "timing_summary_path": str(timing_summary_path) if timing_summary_path else "",
+                "async_agent_invoke_total_seconds": _format_optional(async_telemetry.get("async_agent_invoke_total_seconds")),
+                "async_per_agent_total_seconds": _format_optional(async_telemetry.get("async_per_agent_total_seconds")),
+                "async_concurrency_ratio": _format_optional(async_telemetry.get("async_concurrency_ratio")),
+                "async_semaphore_utilization": _format_optional(async_telemetry.get("async_semaphore_utilization")),
+                "async_slowest_agent": str(async_telemetry.get("async_slowest_agent") or ""),
+                "async_slowest_agent_avg_seconds": _format_optional(async_telemetry.get("async_slowest_agent_avg_seconds")),
+            }
+        )
+    else:
+        for field in ASYNC_LEDGER_COLUMNS:
+            row.setdefault(field, "")
 
     with csv_path.open("a", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_HEADER)
@@ -408,11 +509,14 @@ def schedule_experiments(
     digest_parser: ParseDigest = parse_backtest_digest,
     entrypoint: Path = BACKTESTER_ENTRYPOINT,
     timeout_override: int | None = None,
+    include_async_telemetry: bool = False,
+    timing_dir: Path | None = None,
 ) -> list[tuple[Experiment, Metrics]]:
     """Execute the experiment schedule and append results to the ledger."""
 
     results: list[tuple[Experiment, Metrics]] = []
     cached_metrics: dict[str, Metrics] = {}
+    timing_directory = timing_dir or Path("log") / "backtest_timings"
 
     for experiment in experiments:
         experiment.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -435,6 +539,11 @@ def schedule_experiments(
             _compute_delta(metrics.max_drawdown_pct, baseline_metrics.max_drawdown_pct) if baseline_metrics else None,
         )
 
+        timing_summary_path: Path | None = None
+        async_telemetry: Mapping[str, object] | None = None
+        if include_async_telemetry:
+            timing_summary_path, _, async_telemetry = locate_timing_summary(experiment, timing_dir=timing_directory)
+
         append_ledger_row(
             ledger_path,
             timestamp=datetime.now(timezone.utc),
@@ -442,6 +551,8 @@ def schedule_experiments(
             metrics=metrics,
             baseline_label=experiment.baseline_label,
             deltas=deltas,
+            timing_summary_path=timing_summary_path,
+            async_telemetry=async_telemetry,
         )
 
         cached_metrics[experiment.label] = metrics
@@ -473,6 +584,7 @@ def _load_schedule(path: Path, *, now: datetime | None = None) -> tuple[list[Exp
         "model_provider": str(raw.get("model_provider", "azure")),
         "timeout_seconds": timeout_seconds,
         "ledger_path": Path(str(raw.get("ledger_path", "log/backtest.csv"))).expanduser(),
+        "include_async_telemetry": bool(raw.get("include_async_telemetry", False)),
     }
 
     return experiments, meta
@@ -517,6 +629,7 @@ def _default_schedule(now: datetime | None = None) -> tuple[list[Experiment], di
         "model_provider": "azure",
         "ledger_path": Path("log/backtest.csv"),
         "timeout_seconds": None,
+        "include_async_telemetry": False,
     }
     return defaults, meta
 
@@ -528,6 +641,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model-provider", default=None, help="Override model provider (default azure).")
     parser.add_argument("--timeout", type=int, help="Override per-experiment timeout in seconds.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing them.")
+    parser.add_argument(
+        "--include-async-telemetry",
+        action="store_true",
+        help="Append async timing telemetry into the ledger (reads log/backtest_timings).",
+    )
     return parser.parse_args(argv)
 
 
@@ -550,6 +668,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     model_provider = args.model_provider or meta.get("model_provider", "azure")
     meta_timeout = meta.get("timeout_seconds") if isinstance(meta, dict) else None
     timeout_override = args.timeout if args.timeout is not None else meta_timeout
+    include_async_telemetry = args.include_async_telemetry or bool(meta.get("include_async_telemetry"))
 
     if args.dry_run:
         for experiment in experiments:
@@ -563,6 +682,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         model_provider=model_provider,
         ledger_path=ledger_path,
         timeout_override=timeout_override,
+        include_async_telemetry=include_async_telemetry,
     )
 
     for experiment, metrics in results:

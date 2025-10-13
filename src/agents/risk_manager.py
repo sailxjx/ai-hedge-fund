@@ -1,3 +1,6 @@
+import asyncio
+import copy
+import inspect
 import json
 import math
 from dataclasses import dataclass
@@ -10,10 +13,13 @@ import pandas as pd
 from langchain_core.messages import HumanMessage
 
 from src.graph.state import AgentState, show_agent_reasoning
-from src.tools.api import get_prices, prices_to_df
+from src.tools.api import get_prices_async, prices_to_df
 from src.utils.api_key import get_api_key_from_state
+from src.utils.async_state import update_analyst_signals_async, update_risk_state_async
 from src.utils.progress import progress
 
+# Backwards compatibility hook: tests monkeypatch `get_prices` directly.
+get_prices = None
 
 BULLISH_TREND_CONVICTION = 65
 BEARISH_TREND_CONVICTION = 70
@@ -305,8 +311,24 @@ def _compute_consensus_metrics(
     )
 
 
+async def _fetch_prices_for_risk_manager(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    api_key: str | None,
+):
+    """Resolve price data using a patched synchronous helper when available."""
+    override = globals().get("get_prices")
+    if callable(override):
+        result = override(ticker=ticker, start_date=start_date, end_date=end_date, api_key=api_key)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    return await get_prices_async(ticker=ticker, start_date=start_date, end_date=end_date, api_key=api_key)
+
+
 ##### Risk Management Agent #####
-def risk_management_agent(state: AgentState, agent_id: str = "risk_management_agent"):
+async def _risk_management_agent_impl(state: AgentState, agent_id: str = "risk_management_agent"):
     """Controls position sizing based on volatility-adjusted risk factors for multiple tickers."""
     portfolio = state["data"]["portfolio"]
     data = state["data"]
@@ -328,9 +350,9 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
     all_tickers = set(tickers) | set(portfolio.get("positions", {}).keys())
 
     for ticker in all_tickers:
-        progress.update_status(agent_id, ticker, "Fetching price data and calculating volatility")
+        await progress.aupdate_status(agent_id, ticker, "Fetching price data and calculating volatility")
 
-        prices = get_prices(
+        prices = await _fetch_prices_for_risk_manager(
             ticker=ticker,
             start_date=data["start_date"],
             end_date=data["end_date"],
@@ -338,7 +360,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
         )
 
         if not prices:
-            progress.update_status(agent_id, ticker, "Warning: No price data found")
+            await progress.aupdate_status(agent_id, ticker, "Warning: No price data found")
             volatility_data[ticker] = {"daily_volatility": 0.05, "annualized_volatility": 0.05 * np.sqrt(252), "volatility_percentile": 100, "data_points": 0}  # Default fallback volatility (5% daily)  # Assume high risk if no data
             continue
 
@@ -357,9 +379,9 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
             if len(daily_returns) > 0:
                 returns_by_ticker[ticker] = daily_returns
 
-            progress.update_status(agent_id, ticker, f"Price: {current_price:.2f}, Ann. Vol: {volatility_metrics['annualized_volatility']:.1%}")
+            await progress.aupdate_status(agent_id, ticker, f"Price: {current_price:.2f}, Ann. Vol: {volatility_metrics['annualized_volatility']:.1%}")
         else:
-            progress.update_status(agent_id, ticker, "Warning: Insufficient price data")
+            await progress.aupdate_status(agent_id, ticker, "Warning: Insufficient price data")
             current_prices[ticker] = 0
             volatility_data[ticker] = {"daily_volatility": 0.05, "annualized_volatility": 0.05 * np.sqrt(252), "volatility_percentile": 100, "data_points": len(prices_df) if not prices_df.empty else 0}
 
@@ -386,14 +408,14 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
             # Subtract market value of short positions
             total_portfolio_value -= position.get("short", 0) * current_prices[ticker]
 
-    progress.update_status(agent_id, None, f"Total portfolio value: {total_portfolio_value:.2f}")
+    await progress.aupdate_status(agent_id, None, f"Total portfolio value: {total_portfolio_value:.2f}")
 
     # Calculate volatility- and correlation-adjusted risk limits for each ticker
     for ticker in tickers:
-        progress.update_status(agent_id, ticker, "Calculating volatility- and correlation-adjusted limits")
+        await progress.aupdate_status(agent_id, ticker, "Calculating volatility- and correlation-adjusted limits")
 
         if ticker not in current_prices or current_prices[ticker] <= 0:
-            progress.update_status(agent_id, ticker, "Failed: No valid price data")
+            await progress.aupdate_status(agent_id, ticker, "Failed: No valid price data")
             risk_analysis[ticker] = {"remaining_position_limit": 0.0, "current_price": 0.0, "reasoning": {"error": "Missing price data for risk calculation"}}
             continue
 
@@ -443,9 +465,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
         if current_price > 0:
             risk_limit_shares = max(0, int(math.floor(position_limit / current_price)))
             residual_limit_value = max(0.0, position_limit - current_position_value)
-            risk_remaining_shares = max(
-                0, int(math.floor(residual_limit_value / current_price))
-            )
+            risk_remaining_shares = max(0, int(math.floor(residual_limit_value / current_price)))
         else:
             risk_limit_shares = None
             risk_remaining_shares = None
@@ -457,36 +477,16 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
         existing_short = int(position.get("short", 0) or 0)
 
         consensus_metrics = _compute_consensus_metrics(analyst_signals, ticker)
-        consensus_short_vote = min(
-            CONSENSUS_VOTE_CAP, consensus_metrics.bearish_strength * CONSENSUS_VOTE_WEIGHT
-        )
-        consensus_long_vote = min(
-            CONSENSUS_VOTE_CAP, consensus_metrics.bullish_strength * CONSENSUS_VOTE_WEIGHT
-        )
-        bearish_consensus_active = (
-            consensus_metrics.bearish_strength >= BEARISH_CONSENSUS_MIN
-            and (
-                consensus_metrics.bearish_strength - consensus_metrics.bullish_strength
-            )
-            >= BEARISH_CONSENSUS_DELTA
-        )
+        consensus_short_vote = min(CONSENSUS_VOTE_CAP, consensus_metrics.bearish_strength * CONSENSUS_VOTE_WEIGHT)
+        consensus_long_vote = min(CONSENSUS_VOTE_CAP, consensus_metrics.bullish_strength * CONSENSUS_VOTE_WEIGHT)
+        bearish_consensus_active = consensus_metrics.bearish_strength >= BEARISH_CONSENSUS_MIN and (consensus_metrics.bearish_strength - consensus_metrics.bullish_strength) >= BEARISH_CONSENSUS_DELTA
         if bearish_consensus_active:
-            constraint_notes.append(
-                "Bearish consensus pressure {:.2f} vs bullish {:.2f}".format(
-                    consensus_metrics.bearish_strength, consensus_metrics.bullish_strength
-                )
-            )
+            constraint_notes.append("Bearish consensus pressure {:.2f} vs bullish {:.2f}".format(consensus_metrics.bearish_strength, consensus_metrics.bullish_strength))
             if consensus_metrics.bearish_agents:
-                highlighted = ", ".join(
-                    agent.replace("_agent", "") for agent in consensus_metrics.bearish_agents[:3]
-                )
-                constraint_notes.append(
-                    f"Consensus short push led by {highlighted}" + ("…" if len(consensus_metrics.bearish_agents) > 3 else "")
-                )
+                highlighted = ", ".join(agent.replace("_agent", "") for agent in consensus_metrics.bearish_agents[:3])
+                constraint_notes.append(f"Consensus short push led by {highlighted}" + ("…" if len(consensus_metrics.bearish_agents) > 3 else ""))
 
-        fundamental_bearish_count = sum(
-            1 for agent in consensus_metrics.bearish_agents if agent in FUNDAMENTAL_BEAR_AGENTS
-        )
+        fundamental_bearish_count = sum(1 for agent in consensus_metrics.bearish_agents if agent in FUNDAMENTAL_BEAR_AGENTS)
         fundamentals_stack_active = fundamental_bearish_count >= 2
 
         consensus_relaxed_blocks: list[str] = []
@@ -496,24 +496,13 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
         short_cover_payload = (analyst_signals.get("short_cover_classifier_agent") or {}).get(ticker, {})
         short_cover_constraints = dict(short_cover_payload.get("constraints") or {})
         short_cover_metrics_raw = short_cover_payload.get("metrics")
-        short_cover_metrics = (
-            short_cover_metrics_raw if isinstance(short_cover_metrics_raw, Mapping) else {}
-        )
-        caution_unblock_reason = str(
-            short_cover_metrics.get("new_short_unblock_reason") or ""
-        ).strip().lower()
+        short_cover_metrics = short_cover_metrics_raw if isinstance(short_cover_metrics_raw, Mapping) else {}
+        caution_unblock_reason = str(short_cover_metrics.get("new_short_unblock_reason") or "").strip().lower()
         if caution_unblock_reason:
-            precision_trend_strength = _float_or_none(
-                short_cover_metrics.get("precision_trend_strength")
-            )
-            precision_trim_streak_val = _float_or_none(
-                short_cover_metrics.get("precision_boost_trim_streak")
-            )
+            precision_trend_strength = _float_or_none(short_cover_metrics.get("precision_trend_strength"))
+            precision_trim_streak_val = _float_or_none(short_cover_metrics.get("precision_boost_trim_streak"))
             precision_trim_streak = int(precision_trim_streak_val) if precision_trim_streak_val is not None else 0
-            heavy_trend = (
-                precision_trend_strength is not None
-                and precision_trend_strength >= CAUTION_REBLOCK_TREND_THRESHOLD
-            )
+            heavy_trend = precision_trend_strength is not None and precision_trend_strength >= CAUTION_REBLOCK_TREND_THRESHOLD
             streak_exceeds = precision_trim_streak >= CAUTION_REBLOCK_STREAK_THRESHOLD
             caution_reasons = {"boost_guidance", "near_threshold_guidance"}
             if caution_unblock_reason in caution_reasons and (heavy_trend or streak_exceeds):
@@ -524,17 +513,11 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                     short_cover_constraints["target_short_shares"] = 0
                 note_parts: list[str] = []
                 if heavy_trend:
-                    note_parts.append(
-                        "trend {:.3f}>= {:.3f}".format(
-                            precision_trend_strength, CAUTION_REBLOCK_TREND_THRESHOLD
-                        )
-                    )
+                    note_parts.append("trend {:.3f}>= {:.3f}".format(precision_trend_strength, CAUTION_REBLOCK_TREND_THRESHOLD))
                 if streak_exceeds:
                     note_parts.append(f"boost-trim streak {precision_trim_streak}")
                 detail = "; ".join(note_parts) if note_parts else "trend/streak guard"
-                reblock_note = (
-                    f"Short-cover caution unblock suppressed ({caution_unblock_reason}; {detail})"
-                )
+                reblock_note = f"Short-cover caution unblock suppressed ({caution_unblock_reason}; {detail})"
                 if reblock_note not in constraint_notes:
                     constraint_notes.append(reblock_note)
         momentum_payload = (analyst_signals.get("momentum_guardian_agent") or {}).get(ticker, {})
@@ -562,70 +545,30 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
         stop_payload = (analyst_signals.get("stop_loss_guardian_agent") or {}).get(ticker, {})
         stop_constraints = stop_payload.get("constraints") or {}
 
-        event_signal = (
-            str(event_payload.get("signal") or "").lower()
-            if isinstance(event_payload, Mapping)
-            else ""
-        )
+        event_signal = str(event_payload.get("signal") or "").lower() if isinstance(event_payload, Mapping) else ""
         event_preferred_direction = ""
         if isinstance(event_constraints, Mapping):
             event_preferred_direction = str(event_constraints.get("preferred_direction") or "").lower()
         if not event_preferred_direction and isinstance(event_payload, Mapping):
             event_preferred_direction = str(event_payload.get("preferred_direction") or "").lower()
-        event_confidence = (
-            _float_or_none(event_payload.get("confidence"))
-            if isinstance(event_payload, Mapping)
-            else None
-        )
-        event_bearish_bias = (
-            event_preferred_direction == "short"
-            or event_signal in DOWNSIDE_SENTINEL_SIGNALS
-        )
+        event_confidence = _float_or_none(event_payload.get("confidence")) if isinstance(event_payload, Mapping) else None
+        event_bearish_bias = event_preferred_direction == "short" or event_signal in DOWNSIDE_SENTINEL_SIGNALS
 
-        downside_signal = (
-            str(downside_payload.get("signal") or "").lower()
-            if isinstance(downside_payload, Mapping)
-            else ""
-        )
+        downside_signal = str(downside_payload.get("signal") or "").lower() if isinstance(downside_payload, Mapping) else ""
         downside_preferred_direction = ""
         if isinstance(downside_constraints, Mapping):
             downside_preferred_direction = str(downside_constraints.get("preferred_direction") or "").lower()
-        downside_confidence = (
-            _float_or_none(downside_payload.get("confidence"))
-            if isinstance(downside_payload, Mapping)
-            else None
-        )
-        downside_bearish_bias = (
-            downside_preferred_direction == "short"
-            or downside_signal in DOWNSIDE_SENTINEL_SIGNALS
-            or (
-                downside_confidence is not None
-                and downside_confidence >= 60
-                and "down" in downside_signal
-            )
-        )
+        downside_confidence = _float_or_none(downside_payload.get("confidence")) if isinstance(downside_payload, Mapping) else None
+        downside_bearish_bias = downside_preferred_direction == "short" or downside_signal in DOWNSIDE_SENTINEL_SIGNALS or (downside_confidence is not None and downside_confidence >= 60 and "down" in downside_signal)
 
         catalyst_stack_active = False
         if event_bearish_bias:
-            catalyst_stack_active = True if (
-                (event_confidence is not None and event_confidence >= 60)
-                or downside_bearish_bias
-            ) else False
+            catalyst_stack_active = True if ((event_confidence is not None and event_confidence >= 60) or downside_bearish_bias) else False
 
-        bearish_fundamental_catalyst_stack = (
-            bearish_consensus_active and fundamentals_stack_active and catalyst_stack_active
-        )
+        bearish_fundamental_catalyst_stack = bearish_consensus_active and fundamentals_stack_active and catalyst_stack_active
 
-        short_squeeze_signal = (
-            str(short_squeeze_payload.get("signal") or "").lower()
-            if isinstance(short_squeeze_payload, Mapping)
-            else ""
-        )
-        squeeze_constraints_raw = (
-            short_squeeze_payload.get("constraints")
-            if isinstance(short_squeeze_payload, Mapping)
-            else {}
-        )
+        short_squeeze_signal = str(short_squeeze_payload.get("signal") or "").lower() if isinstance(short_squeeze_payload, Mapping) else ""
+        squeeze_constraints_raw = short_squeeze_payload.get("constraints") if isinstance(short_squeeze_payload, Mapping) else {}
         if not isinstance(squeeze_constraints_raw, Mapping):
             squeeze_constraints_raw = {}
         short_squeeze_hard_block = str(squeeze_constraints_raw.get("block_new_shorts") or "").lower() in {"true", "1"}
@@ -758,17 +701,13 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
 
         crash_raw_target_raw = (crash_allocator_constraints or {}).get("raw_target_short_shares")
         crash_raw_target_value = _float_or_none(crash_raw_target_raw)
-        crash_raw_target_shares = (
-            int(crash_raw_target_value) if crash_raw_target_value is not None else None
-        )
+        crash_raw_target_shares = int(crash_raw_target_value) if crash_raw_target_value is not None else None
         if crash_raw_target_shares is not None:
             crash_raw_target_shares = max(0, crash_raw_target_shares)
         if crash_raw_target_shares is None:
             crash_indicators = (crash_allocator_payload or {}).get("indicators")
             if isinstance(crash_indicators, Mapping):
-                crash_indicator_target = _float_or_none(
-                    crash_indicators.get("raw_target_short_shares")
-                )
+                crash_indicator_target = _float_or_none(crash_indicators.get("raw_target_short_shares"))
                 if crash_indicator_target is not None:
                     crash_raw_target_shares = max(0, int(crash_indicator_target))
 
@@ -776,11 +715,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
         if crash_allocator_target_for_push is None:
             crash_allocator_target_for_push = crash_target_shares
 
-        crash_allocator_pushes_short = (
-            crash_allocator_target_for_push is not None
-            and crash_allocator_target_for_push > existing_short
-            and crash_allocator_signal in {"crash_short", "short_bias"}
-        )
+        crash_allocator_pushes_short = crash_allocator_target_for_push is not None and crash_allocator_target_for_push > existing_short and crash_allocator_signal in {"crash_short", "short_bias"}
 
         downside_crash_signal = downside_signal in {"crash_flow"}
         crash_prob_bias = crash_prob is not None and crash_prob >= 0.5
@@ -800,16 +735,9 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
 
         crash_bias_weight = min(1.2, max(0.0, crash_bias_weight))
 
-        crash_override_active = crash_allocator_pushes_short and (
-            crash_prob_bias or downside_crash_signal or crash_allocator_conf_pct >= 0.7
-        )
+        crash_override_active = crash_allocator_pushes_short and (crash_prob_bias or downside_crash_signal or crash_allocator_conf_pct >= 0.7)
 
-        if (
-            trend_enforced_short_block
-            and bearish_fundamental_catalyst_stack
-            and not crash_override_active
-            and not crash_mode_active
-        ):
+        if trend_enforced_short_block and bearish_fundamental_catalyst_stack and not crash_override_active and not crash_mode_active:
             for key in ("block_new_shorts", "max_additional_short_shares", "max_short_exposure_pct"):
                 short_squeeze_constraints.pop(key, None)
             short_squeeze_constraints["allow_short"] = True
@@ -821,9 +749,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 mean_rev_constraints["preferred_direction"] = trend_mean_rev_original_pref
             _remove_note(constraint_notes, "Bullish trend confirmation blocking new shorts")
             _remove_note(constraint_notes, "Suppressed mean reversion short bias due to bullish trend conviction")
-            constraint_notes.append(
-                "Bearish fundamentals + catalyst stack override bullish trend short block"
-            )
+            constraint_notes.append("Bearish fundamentals + catalyst stack override bullish trend short block")
             trend_enforced_short_block = False
             trend_forced_mean_rev_cap = False
 
@@ -881,14 +807,8 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
         short_cap_source: str | None = None
         short_cap_force_deficit: int | None = None
         short_cap_target: int | None = None
-        crash_short_cap_pct_value = _float_or_none(
-            crash_allocator_constraints.get("max_short_exposure_pct")
-        )
-        crash_short_cap_pct_value = (
-            max(0.0, float(crash_short_cap_pct_value))
-            if crash_short_cap_pct_value is not None
-            else None
-        )
+        crash_short_cap_pct_value = _float_or_none(crash_allocator_constraints.get("max_short_exposure_pct"))
+        crash_short_cap_pct_value = max(0.0, float(crash_short_cap_pct_value)) if crash_short_cap_pct_value is not None else None
         crash_cap_override_applied = False
         for name, constraint in constraint_sources:
             value = constraint.get("max_short_exposure_pct")
@@ -897,9 +817,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 if bearish_consensus_active and name in CONSENSUS_RELAX_BLOCKERS:
                     if name == "EventCatalyst" and event_confidence is not None and event_confidence > 65:
                         pass
-                    elif name == "ShortSqueeze" and (
-                        short_squeeze_signal in {"squeeze_warning", "elevated_risk"} or short_squeeze_hard_block
-                    ):
+                    elif name == "ShortSqueeze" and (short_squeeze_signal in {"squeeze_warning", "elevated_risk"} or short_squeeze_hard_block):
                         pass
                     elif name == "ShortCover":
                         short_cover_payload = payload_lookup.get("ShortCover")
@@ -917,11 +835,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                     short_cap_pct = candidate_pct
                     short_cap_source = name
 
-        if (
-            (crash_override_active or crash_mode_active)
-            and crash_short_cap_pct_value is not None
-            and crash_short_cap_pct_value > 0.0
-        ):
+        if (crash_override_active or crash_mode_active) and crash_short_cap_pct_value is not None and crash_short_cap_pct_value > 0.0:
             if short_cap_pct is None or short_cap_pct <= 0.0:
                 short_cap_pct = crash_short_cap_pct_value
                 short_cap_source = "CrashAllocator"
@@ -930,10 +844,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 short_cap_pct = crash_short_cap_pct_value
                 short_cap_source = "CrashAllocator"
                 crash_cap_override_applied = True
-            elif (
-                short_cap_source != "CrashAllocator"
-                and math.isclose(short_cap_pct, crash_short_cap_pct_value, rel_tol=1e-9, abs_tol=1e-9)
-            ):
+            elif short_cap_source != "CrashAllocator" and math.isclose(short_cap_pct, crash_short_cap_pct_value, rel_tol=1e-9, abs_tol=1e-9):
                 short_cap_source = "CrashAllocator"
                 crash_cap_override_applied = True
 
@@ -1065,9 +976,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 position_limit = capped_limit
                 constraint_notes.append(f"{cap_source} long cap {cap_pct:.1%}")
 
-        allow_short_blocks: list[str] = [
-            name for name, constraint in constraint_sources if constraint.get("allow_short") is False
-        ]
+        allow_short_blocks: list[str] = [name for name, constraint in constraint_sources if constraint.get("allow_short") is False]
 
         if bearish_consensus_active and allow_short_blocks:
             filtered_allow_blocks: list[str] = []
@@ -1106,10 +1015,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                     override_label = "Crash-mode override"
                 elif crash_override_active and crash_mode_active:
                     override_label = "Crash override (allocator + mode)"
-                constraint_notes.append(
-                    f"{override_label} ignores directional short blocks from "
-                    + ", ".join(sorted(ignored_blocks))
-                )
+                constraint_notes.append(f"{override_label} ignores directional short blocks from " + ", ".join(sorted(ignored_blocks)))
 
         if allow_short_blocks:
             overrides["block_new_shorts"] = True
@@ -1119,9 +1025,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 if note not in constraint_notes:
                     constraint_notes.append(note)
         else:
-            block_short_sources = [
-                name for name, constraint in constraint_sources if constraint.get("block_new_shorts")
-            ]
+            block_short_sources = [name for name, constraint in constraint_sources if constraint.get("block_new_shorts")]
             if bearish_consensus_active and block_short_sources:
                 filtered_block_sources: list[str] = []
                 for name in block_short_sources:
@@ -1148,22 +1052,15 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 block_short_sources = filtered_block_sources
             if block_short_sources and (crash_override_active or crash_mode_active):
                 directional_block_sources = {"Trend", "Momentum", "EventCatalyst", "GrowthMomentum"}
-                ignored_blocks = [
-                    name for name in block_short_sources if name in directional_block_sources
-                ]
-                block_short_sources = [
-                    name for name in block_short_sources if name not in directional_block_sources
-                ]
+                ignored_blocks = [name for name in block_short_sources if name in directional_block_sources]
+                block_short_sources = [name for name in block_short_sources if name not in directional_block_sources]
                 if ignored_blocks:
                     override_label = "Crash override"
                     if crash_mode_active and not crash_override_active:
                         override_label = "Crash-mode override"
                     elif crash_override_active and crash_mode_active:
                         override_label = "Crash override (allocator + mode)"
-                    constraint_notes.append(
-                        f"{override_label} ignores block_new_shorts from "
-                        + ", ".join(sorted(ignored_blocks))
-                    )
+                    constraint_notes.append(f"{override_label} ignores block_new_shorts from " + ", ".join(sorted(ignored_blocks)))
 
             if block_short_sources:
                 overrides["block_new_shorts"] = True
@@ -1196,10 +1093,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
 
             candidate = max(0, int(target))
             if candidate == 0:
-                if (
-                    (crash_override_active or crash_mode_active)
-                    and name in DIRECTIONAL_SHORT_SOURCES
-                ):
+                if (crash_override_active or crash_mode_active) and name in DIRECTIONAL_SHORT_SOURCES:
                     continue
                 if bearish_consensus_active and name in CONSENSUS_RELAX_BLOCKERS:
                     if name == "ShortCover":
@@ -1226,14 +1120,10 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                     override_label = "Crash allocator override" if crash_override_active else "Crash-mode override"
                     if crash_override_active and crash_mode_active:
                         override_label = "Crash override (allocator + mode)"
-                    constraint_notes.append(
-                        f"{override_label} bypasses EventCatalyst short freeze"
-                    )
+                    constraint_notes.append(f"{override_label} bypasses EventCatalyst short freeze")
                 else:
                     overrides["target_short_shares"] = existing_short
-                    constraint_notes.append(
-                        "EventCatalyst holding short exposure steady pre-event"
-                    )
+                    constraint_notes.append("EventCatalyst holding short exposure steady pre-event")
 
         preferred_direction = None
         direction_votes = {"long": 0.0, "short": 0.0}
@@ -1258,9 +1148,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
             if lower_pref == "long":
                 can_flip_short = not allow_short_blocks and not block_short_sources and not overrides.get("block_new_shorts")
                 preferred_direction = "short" if can_flip_short else "neutral"
-                constraint_notes.append(
-                    f"Bearish consensus adjusted preferred direction to {preferred_direction}"
-                )
+                constraint_notes.append(f"Bearish consensus adjusted preferred direction to {preferred_direction}")
 
         force_cover_candidates: list[tuple[int, str, str | None]] = []
         if existing_short > 0:
@@ -1269,9 +1157,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 if isinstance(qty, (int, float)) and qty > 0:
                     forced = min(existing_short, int(qty))
                     if forced > 0:
-                        force_cover_candidates.append(
-                            (forced, name, constraint.get("force_cover_reason"))
-                        )
+                        force_cover_candidates.append((forced, name, constraint.get("force_cover_reason")))
 
         if force_cover_candidates:
             forced_qty, source_name, force_reason = max(force_cover_candidates, key=lambda x: x[0])
@@ -1295,11 +1181,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 force_qty = short_cap_force_deficit
 
             overrides["force_cover_qty"] = force_qty
-            cap_reason = (
-                f"Short exposure above cap of {short_cap_target} shares"
-                if short_cap_target is not None
-                else "Short exposure above cap threshold"
-            )
+            cap_reason = f"Short exposure above cap of {short_cap_target} shares" if short_cap_target is not None else "Short exposure above cap threshold"
             overrides.setdefault("force_cover_reason", cap_reason)
 
         if preferred_direction:
@@ -1328,9 +1210,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                     overrides["target_short_shares"] = remaining_short
                 elif target_short_int > remaining_short:
                     overrides["target_short_shares"] = remaining_short
-                    note = (
-                        f"Force cover of {force_cover_int} trims target shorts to {remaining_short} shares"
-                    )
+                    note = f"Force cover of {force_cover_int} trims target shorts to {remaining_short} shares"
                     if note not in constraint_notes:
                         constraint_notes.append(note)
 
@@ -1355,9 +1235,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 override_label = "Crash allocator override" if crash_override_active else "Crash-mode override"
                 if crash_override_active and crash_mode_active:
                     override_label = "Crash override (allocator + mode)"
-                constraint_notes.append(
-                    f"{override_label} keeps short adds open despite long vote delta {long_vote_delta:.2f} (thr {vote_threshold:.2f})"
-                )
+                constraint_notes.append(f"{override_label} keeps short adds open despite long vote delta {long_vote_delta:.2f} (thr {vote_threshold:.2f})")
             else:
                 overrides["block_new_shorts"] = True
                 overrides["max_additional_short_shares"] = 0
@@ -1367,9 +1245,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                         "force_cover_reason",
                         "Long-bias consensus across analysts",
                     )
-                constraint_notes.append(
-                    f"Direction votes long delta {long_vote_delta:.2f} >= {vote_threshold:.2f}; blocking new shorts"
-                )
+                constraint_notes.append(f"Direction votes long delta {long_vote_delta:.2f} >= {vote_threshold:.2f}; blocking new shorts")
 
         long_weight = 0.0
         if prob_up is not None and base_rate is not None:
@@ -1425,15 +1301,11 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 capped_target = min(best_target, event_long_cap)
                 if capped_target < best_target:
                     if capped_target <= existing_long:
-                        constraint_notes.append(
-                            "EventCatalyst deferring incremental long adds pre-event"
-                        )
+                        constraint_notes.append("EventCatalyst deferring incremental long adds pre-event")
                     else:
                         delta = max(0, capped_target - existing_long)
                         if delta > 0:
-                            constraint_notes.append(
-                                f"EventCatalyst cap long add to +{delta} shares"
-                        )
+                            constraint_notes.append(f"EventCatalyst cap long add to +{delta} shares")
                 best_target = capped_target
             forced_cover_active = bool(overrides.get("force_cover_qty") and existing_short > 0)
             if best_target > existing_long:
@@ -1456,16 +1328,10 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
         if capped_long_share_sources:
             capped_shares, cap_source = min(capped_long_share_sources, key=lambda item: item[0])
             current_target = overrides.get("target_long_shares")
-            effective_target = (
-                int(current_target)
-                if isinstance(current_target, (int, float))
-                else existing_long
-            )
+            effective_target = int(current_target) if isinstance(current_target, (int, float)) else existing_long
             if capped_shares < effective_target:
                 overrides["target_long_shares"] = capped_shares
-                constraint_notes.append(
-                    f"{cap_source} trims long exposure to {capped_shares} shares"
-                )
+                constraint_notes.append(f"{cap_source} trims long exposure to {capped_shares} shares")
                 if capped_shares <= existing_long:
                     overrides.pop("force_buy_reason", None)
 
@@ -1515,17 +1381,13 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 override_label = "Crash allocator override" if crash_override_active else "Crash-mode override"
                 if crash_override_active and crash_mode_active:
                     override_label = "Crash override (allocator + mode)"
-                constraint_notes.append(
-                    f"{override_label} bypasses EventCatalyst churn freeze"
-                )
+                constraint_notes.append(f"{override_label} bypasses EventCatalyst churn freeze")
             else:
                 current_cap = overrides.get("max_additional_short_shares")
                 if current_cap is None or (isinstance(current_cap, (int, float)) and current_cap > 0):
                     overrides["max_additional_short_shares"] = 0
                 overrides.setdefault("block_new_shorts", True)
-                constraint_notes.append(
-                    "EventCatalyst limiting position churn ahead of catalyst"
-                )
+                constraint_notes.append("EventCatalyst limiting position churn ahead of catalyst")
 
         existing_short = int(position.get("short", 0) or 0)
         force_cover_raw = overrides.get("force_cover_qty")
@@ -1574,21 +1436,11 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
 
         if short_adds_blocked and target_short_int is not None and target_short_int > existing_short:
             overrides["target_short_shares"] = existing_short
-            if (
-                "Short target clamped to existing exposure under blocked short adds"
-                not in constraint_notes
-            ):
-                constraint_notes.append(
-                    "Short target clamped to existing exposure under blocked short adds"
-                )
+            if "Short target clamped to existing exposure under blocked short adds" not in constraint_notes:
+                constraint_notes.append("Short target clamped to existing exposure under blocked short adds")
             target_short_int = existing_short
 
-        if (
-            target_short_int is not None
-            and short_cap_int is not None
-            and short_cap_int >= 0
-            and target_short_int > existing_short + short_cap_int
-        ):
+        if target_short_int is not None and short_cap_int is not None and short_cap_int >= 0 and target_short_int > existing_short + short_cap_int:
             reachable_short = existing_short + short_cap_int
             overrides["target_short_shares"] = reachable_short
             additional_capacity = max(0, reachable_short - existing_short)
@@ -1609,22 +1461,14 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
             target_short_int = reachable_short
 
         preferred_short = overrides.get("preferred_direction")
-        if (
-            short_adds_blocked
-            and str(preferred_short or "").lower() == "short"
-            and existing_short <= 0
-        ):
+        if short_adds_blocked and str(preferred_short or "").lower() == "short" and existing_short <= 0:
             overrides["preferred_direction"] = "neutral"
-            constraint_notes.append(
-                "Short bias relaxed to neutral because short adds are blocked and no short exposure remains"
-            )
+            constraint_notes.append("Short bias relaxed to neutral because short adds are blocked and no short exposure remains")
 
         if current_price > 0:
             final_limit_shares = max(0, int(math.floor(position_limit / current_price)))
             final_remaining_value = max(0.0, position_limit - current_position_value)
-            final_remaining_shares = max(
-                0, int(math.floor(final_remaining_value / current_price))
-            )
+            final_remaining_shares = max(0, int(math.floor(final_remaining_value / current_price)))
         else:
             final_limit_shares = None
             final_remaining_shares = None
@@ -1694,10 +1538,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 "crash_allocator_raw_target_shares",
                 int(crash_raw_target_shares),
             )
-            if (
-                crash_allocator_target_for_push is not None
-                and crash_allocator_target_for_push > existing_short
-            ):
+            if crash_allocator_target_for_push is not None and crash_allocator_target_for_push > existing_short:
                 clip_reasons: list[str] = []
                 if overrides.get("block_new_shorts"):
                     clip_reasons.append("block_new_shorts guardrails")
@@ -1707,10 +1548,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 if short_cap_source and short_cap_pct is not None:
                     clip_reasons.append(f"{short_cap_source} cap {short_cap_pct:.1%}")
                 if clip_reasons:
-                    clip_note = (
-                        f"Crash allocator raw target {int(crash_raw_target_shares)} clipped by "
-                        + ", ".join(dict.fromkeys(clip_reasons))
-                    )
+                    clip_note = f"Crash allocator raw target {int(crash_raw_target_shares)} clipped by " + ", ".join(dict.fromkeys(clip_reasons))
                     if clip_note not in constraint_notes:
                         constraint_notes.append(clip_note)
 
@@ -1747,9 +1585,7 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                     "override_active": crash_override_active,
                     "mode_active": crash_mode_active,
                     "probability_streak": crash_prob_streak,
-                    "raw_target_shares": int(crash_raw_target_shares)
-                    if crash_raw_target_shares is not None
-                    else None,
+                    "raw_target_shares": int(crash_raw_target_shares) if crash_raw_target_shares is not None else None,
                 },
             },
         }
@@ -1783,14 +1619,10 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
                 harmonised_target = max_short_allowed
                 overrides["target_short_shares"] = harmonised_target
                 if final_cap_int is not None:
-                    overrides["max_additional_short_shares"] = max(
-                        0, harmonised_target - existing_short
-                    )
+                    overrides["max_additional_short_shares"] = max(0, harmonised_target - existing_short)
                 if harmonised_target <= existing_short:
                     overrides["block_new_shorts"] = True
-                note = (
-                    f"Short target harmonised to {harmonised_target} shares based on available capacity"
-                )
+                note = f"Short target harmonised to {harmonised_target} shares based on available capacity"
                 if note not in constraint_notes:
                     constraint_notes.append(note)
 
@@ -1828,9 +1660,9 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
             }
         )
 
-        progress.update_status(agent_id, ticker, f"Adj. limit: {effective_limit_pct:.1%}, Available: ${max_position_size:.0f}")
+        await progress.aupdate_status(agent_id, ticker, f"Adj. limit: {effective_limit_pct:.1%}, Available: ${max_position_size:.0f}")
 
-    progress.update_status(agent_id, None, "Done")
+    await progress.aupdate_status(agent_id, None, "Done")
 
     message = HumanMessage(
         content=json.dumps(risk_analysis),
@@ -1846,6 +1678,45 @@ def risk_management_agent(state: AgentState, agent_id: str = "risk_management_ag
     return {
         "messages": state["messages"] + [message],
         "data": data,
+    }
+
+
+def risk_management_agent(state: AgentState, agent_id: str = "risk_management_agent"):
+    """Synchronous adapter that runs the async risk manager implementation."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_risk_management_agent_impl(state, agent_id))
+    raise RuntimeError("risk_management_agent cannot run inside an active event loop; use risk_management_agent_async instead.")
+
+
+async def risk_management_agent_async(state: AgentState, agent_id: str = "risk_management_agent"):
+    """Async risk manager that updates shared agent state without thread offloading."""
+    clone_state: AgentState = {
+        "messages": list(state.get("messages", [])),
+        "data": copy.deepcopy(state.get("data", {})),
+        "metadata": copy.deepcopy(state.get("metadata", {})),
+    }
+
+    result = await _risk_management_agent_impl(clone_state, agent_id)
+
+    analyst_payload = clone_state.get("data", {}).get("analyst_signals", {}).get(agent_id, {})
+    await update_analyst_signals_async(state, agent_id, analyst_payload)
+
+    risk_state = clone_state.get("data", {}).get("risk_manager_state")
+    if risk_state is not None:
+        await update_risk_state_async(state, copy.deepcopy(risk_state))
+
+    if isinstance(result, dict) and result.get("messages"):
+        latest_message = result["messages"][-1]
+    else:
+        latest_message = HumanMessage(content=json.dumps(analyst_payload), name=agent_id)
+
+    messages = list(state.get("messages", [])) + [latest_message]
+
+    return {
+        "messages": messages,
+        "data": state["data"],
     }
 
 

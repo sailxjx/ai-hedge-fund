@@ -11,7 +11,6 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 
-
 REGIME_LABELS = ("crash", "rally", "consolidation")
 FEATURE_COLUMNS = (
     "volatility_slope",
@@ -81,9 +80,7 @@ def _prepare_regimes(regimes: Sequence[str] | None) -> tuple[str, ...]:
             if not name:
                 continue
             if name not in REGIME_LABELS:
-                raise ValueError(
-                    f"Unsupported regime label '{regime}'. Expected one of {REGIME_LABELS}."
-                )
+                raise ValueError(f"Unsupported regime label '{regime}'. Expected one of {REGIME_LABELS}.")
             prepared.append(name)
         return tuple(prepared)
     return REGIME_LABELS
@@ -119,9 +116,7 @@ def _load_datasets(config: TrainingConfig) -> pd.DataFrame:
             frames.append(frame)
 
     if not frames:
-        raise SystemExit(
-            "No regime feature tables found for the requested tickers/regimes."
-        )
+        raise SystemExit("No regime feature tables found for the requested tickers/regimes.")
     dataset = pd.concat(frames, ignore_index=True)
     dataset = dataset.reset_index(drop=True)
     dataset = dataset.dropna(subset=FEATURE_COLUMNS)
@@ -131,10 +126,7 @@ def _load_datasets(config: TrainingConfig) -> pd.DataFrame:
     missing = [regime for regime in config.regimes if regime not in present]
     if missing:
         joined = ", ".join(missing)
-        raise SystemExit(
-            "Insufficient coverage for regimes: "
-            f"{joined}. Generate feature tables for the missing windows before training."
-        )
+        raise SystemExit("Insufficient coverage for regimes: " f"{joined}. Generate feature tables for the missing windows before training.")
     return dataset
 
 
@@ -248,14 +240,8 @@ def _build_calibration(
     feature_means = {feature: float(value) for feature, value in zip(FEATURE_COLUMNS, means)}
     feature_stds = {feature: float(value) for feature, value in zip(FEATURE_COLUMNS, stds)}
 
-    weights_dict = {
-        label: [float(weight) for weight in weights[idx]]
-        for idx, label in enumerate(class_labels)
-    }
-    bias_dict = {
-        label: float(bias[idx])
-        for idx, label in enumerate(class_labels)
-    }
+    weights_dict = {label: [float(weight) for weight in weights[idx]] for idx, label in enumerate(class_labels)}
+    bias_dict = {label: float(bias[idx]) for idx, label in enumerate(class_labels)}
 
     calibration = CalibrationResult(
         classes=class_labels,
@@ -362,15 +348,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     _write_output(calibration, output_path)
 
     metadata = calibration
-    print(
-        "Saved calibrated weights to"
-        f" {output_path} (samples={metadata.sample_count}, train_acc={metadata.accuracy:.3f},"
-        + (
-            f" val_acc={metadata.validation_accuracy:.3f})"
-            if metadata.validation_accuracy is not None
-            else ")"
-        )
-    )
+    print("Saved calibrated weights to" f" {output_path} (samples={metadata.sample_count}, train_acc={metadata.accuracy:.3f}," + (f" val_acc={metadata.validation_accuracy:.3f})" if metadata.validation_accuracy is not None else ")"))
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entrypoint

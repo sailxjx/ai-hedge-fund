@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from .data_types import Action, ActionLiteral
 from .portfolio import Portfolio
-from .data_types import ActionLiteral, Action
 
 
 class TradeExecutor:
@@ -35,4 +35,3 @@ class TradeExecutor:
 
         # hold or unknown action
         return 0
-

@@ -4,6 +4,7 @@ import pytest
 
 from src.backtesting.portfolio import Portfolio
 
+
 def test_apply_long_buy_basic(portfolio: Portfolio) -> None:
     executed = portfolio.apply_long_buy("AAPL", quantity=100, price=50.0)
     assert executed == 100
@@ -100,9 +101,7 @@ def test_apply_short_cover_clamps_to_existing_short() -> None:
     assert p.get_snapshot()["positions"]["AAPL"]["short"] == 0
 
 
-@pytest.mark.parametrize("action", [
-    ("buy"), ("sell"), ("short"), ("cover")
-])
+@pytest.mark.parametrize("action", [("buy"), ("sell"), ("short"), ("cover")])
 def test_zero_or_negative_quantity_is_noop(portfolio: Portfolio, action: str) -> None:
     before = portfolio.get_snapshot()
     if action == "buy":
@@ -120,5 +119,3 @@ def test_zero_or_negative_quantity_is_noop(portfolio: Portfolio, action: str) ->
     after = portfolio.get_snapshot()
     assert executed == 0 and executed2 == 0
     assert after == before
-
-

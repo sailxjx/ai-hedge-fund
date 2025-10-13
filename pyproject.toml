@@ -56,5 +56,11 @@ include = '\.pyi?$'
 profile = "black"
 force_alphabetical_sort_within_sections = true
 
+[tool.flake8]
+max-line-length = 420
+extend-ignore = [
+    "E203",  # match black slicing
+    "W503",  # allow line breaks before binary operators
+]
 [tool.poetry.scripts]
 backtester = "src.backtesting.cli:main"

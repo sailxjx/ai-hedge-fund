@@ -7,7 +7,6 @@ import pytest
 
 from src.tools.llm_backtest_digest import main, parse_backtest_digest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_LOG = REPO_ROOT / "tests" / "fixtures" / "logs" / "sample_backtest_agents.txt"
 
@@ -74,10 +73,7 @@ def test_main_writes_json(tmp_path) -> None:
 
 
 def test_parse_backtest_digest_handles_persona_short_cover(tmp_path) -> None:
-    log_text = (
-        "⋯ Short Cover Classifier[TSLA] Persona squeeze view 23.5% (thr 24.6%) →        \n"
-        "BIAS_LONG\n"
-    )
+    log_text = "⋯ Short Cover Classifier[TSLA] Persona squeeze view 23.5% (thr 24.6%) →        \n" "BIAS_LONG\n"
     log_path = tmp_path / "persona_short_cover.log"
     log_path.write_text(log_text)
 

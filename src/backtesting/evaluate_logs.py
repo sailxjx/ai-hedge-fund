@@ -20,7 +20,7 @@ import argparse
 import csv
 import json
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 

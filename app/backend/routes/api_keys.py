@@ -1,17 +1,18 @@
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
 from typing import List
 
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
 from app.backend.database import get_db
-from app.backend.repositories.api_key_repository import ApiKeyRepository
 from app.backend.models.schemas import (
+    ApiKeyBulkUpdateRequest,
     ApiKeyCreateRequest,
-    ApiKeyUpdateRequest,
     ApiKeyResponse,
     ApiKeySummaryResponse,
-    ApiKeyBulkUpdateRequest,
-    ErrorResponse
+    ApiKeyUpdateRequest,
+    ErrorResponse,
 )
+from app.backend.repositories.api_key_repository import ApiKeyRepository
 
 router = APIRouter(prefix="/api-keys", tags=["api-keys"])
 
@@ -28,12 +29,7 @@ async def create_or_update_api_key(request: ApiKeyCreateRequest, db: Session = D
     """Create a new API key or update existing one"""
     try:
         repo = ApiKeyRepository(db)
-        api_key = repo.create_or_update_api_key(
-            provider=request.provider,
-            key_value=request.key_value,
-            description=request.description,
-            is_active=request.is_active
-        )
+        api_key = repo.create_or_update_api_key(provider=request.provider, key_value=request.key_value, description=request.description, is_active=request.is_active)
         return ApiKeyResponse.from_orm(api_key)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create/update API key: {str(e)}")
@@ -90,12 +86,7 @@ async def update_api_key(provider: str, request: ApiKeyUpdateRequest, db: Sessio
     """Update an existing API key"""
     try:
         repo = ApiKeyRepository(db)
-        api_key = repo.update_api_key(
-            provider=provider,
-            key_value=request.key_value,
-            description=request.description,
-            is_active=request.is_active
-        )
+        api_key = repo.update_api_key(provider=provider, key_value=request.key_value, description=request.description, is_active=request.is_active)
         if not api_key:
             raise HTTPException(status_code=404, detail="API key not found")
         return ApiKeyResponse.from_orm(api_key)
@@ -142,7 +133,7 @@ async def deactivate_api_key(provider: str, db: Session = Depends(get_db)):
         success = repo.deactivate_api_key(provider)
         if not success:
             raise HTTPException(status_code=404, detail="API key not found")
-        
+
         # Return the updated key
         api_key = repo.get_api_key_by_provider(provider)
         return ApiKeySummaryResponse.from_orm(api_key)
@@ -164,15 +155,7 @@ async def bulk_update_api_keys(request: ApiKeyBulkUpdateRequest, db: Session = D
     """Bulk create or update multiple API keys"""
     try:
         repo = ApiKeyRepository(db)
-        api_keys_data = [
-            {
-                'provider': key.provider,
-                'key_value': key.key_value,
-                'description': key.description,
-                'is_active': key.is_active
-            }
-            for key in request.api_keys
-        ]
+        api_keys_data = [{"provider": key.provider, "key_value": key.key_value, "description": key.description, "is_active": key.is_active} for key in request.api_keys]
         api_keys = repo.bulk_create_or_update(api_keys_data)
         return [ApiKeyResponse.from_orm(key) for key in api_keys]
     except Exception as e:
@@ -198,4 +181,4 @@ async def update_last_used(provider: str, db: Session = Depends(get_db)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update last used timestamp: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Failed to update last used timestamp: {str(e)}")

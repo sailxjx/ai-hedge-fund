@@ -1,13 +1,23 @@
-from src.graph.state import AgentState, show_agent_reasoning
-from src.tools.api import get_financial_metrics, get_market_cap, search_line_items
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage
-from pydantic import BaseModel
 import json
+
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel
 from typing_extensions import Literal
-from src.utils.progress import progress
-from src.utils.llm import call_llm
+
+from src.graph.state import AgentState, show_agent_reasoning
+from src.tools.api import (
+    get_financial_metrics,
+    get_financial_metrics_async,
+    get_market_cap,
+    get_market_cap_async,
+    search_line_items,
+    search_line_items_async,
+)
 from src.utils.api_key import get_api_key_from_state
+from src.utils.async_state import update_analyst_signals_async
+from src.utils.llm import async_call_llm, call_llm
+from src.utils.progress import progress
 
 
 class MohnishPabraiSignal(BaseModel):
@@ -75,11 +85,7 @@ def mohnish_pabrai_agent(state: AgentState, agent_id: str = "mohnish_pabrai_agen
         double_potential = analyze_double_potential(line_items, market_cap)
 
         # Combine to an overall score in spirit of Pabrai: heavily weight downside and cash yield
-        total_score = (
-            downside["score"] * 0.45
-            + valuation["score"] * 0.35
-            + double_potential["score"] * 0.20
-        )
+        total_score = downside["score"] * 0.45 + valuation["score"] * 0.35 + double_potential["score"] * 0.20
         max_score = 10
 
         analysis_data[ticker] = {
@@ -115,6 +121,105 @@ def mohnish_pabrai_agent(state: AgentState, agent_id: str = "mohnish_pabrai_agen
     progress.update_status(agent_id, None, "Done")
 
     state["data"]["analyst_signals"][agent_id] = pabrai_analysis
+
+    return {"messages": [message], "data": state["data"]}
+
+
+async def mohnish_pabrai_agent_async(state: AgentState, agent_id: str = "mohnish_pabrai_agent"):
+    """Evaluate stocks using Mohnish Pabrai's checklist and 'heads I win, tails I don't lose much' approach."""
+    data = state["data"]
+    end_date = data["end_date"]
+    tickers = data["tickers"]
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+
+    analysis_data: dict[str, any] = {}
+    pabrai_analysis: dict[str, any] = {}
+
+    # Pabrai focuses on: downside protection, simple business, moat via unit economics, FCF yield vs alternatives,
+    # and potential for doubling in 2-3 years at low risk.
+    for ticker in tickers:
+        progress.update_status(agent_id, ticker, "Fetching financial metrics")
+        metrics = await get_financial_metrics_async(ticker, end_date, period="annual", limit=8, api_key=api_key)
+
+        progress.update_status(agent_id, ticker, "Gathering financial line items")
+        line_items = await search_line_items_async(
+            ticker,
+            [
+                # Profitability and cash generation
+                "revenue",
+                "gross_profit",
+                "gross_margin",
+                "operating_income",
+                "operating_margin",
+                "net_income",
+                "free_cash_flow",
+                # Balance sheet - debt and liquidity
+                "total_debt",
+                "cash_and_equivalents",
+                "current_assets",
+                "current_liabilities",
+                "shareholders_equity",
+                # Capital intensity
+                "capital_expenditure",
+                "depreciation_and_amortization",
+                # Shares outstanding for per-share context
+                "outstanding_shares",
+            ],
+            end_date,
+            period="annual",
+            limit=8,
+            api_key=api_key,
+        )
+
+        progress.update_status(agent_id, ticker, "Getting market cap")
+        market_cap = await get_market_cap_async(ticker, end_date, api_key=api_key)
+
+        progress.update_status(agent_id, ticker, "Analyzing downside protection")
+        downside = analyze_downside_protection(line_items)
+
+        progress.update_status(agent_id, ticker, "Analyzing cash yield and valuation")
+        valuation = analyze_pabrai_valuation(line_items, market_cap)
+
+        progress.update_status(agent_id, ticker, "Assessing potential to double")
+        double_potential = analyze_double_potential(line_items, market_cap)
+
+        # Combine to an overall score in spirit of Pabrai: heavily weight downside and cash yield
+        total_score = downside["score"] * 0.45 + valuation["score"] * 0.35 + double_potential["score"] * 0.20
+        max_score = 10
+
+        analysis_data[ticker] = {
+            "score": total_score,
+            "max_score": max_score,
+            "downside_protection": downside,
+            "valuation": valuation,
+            "double_potential": double_potential,
+            "market_cap": market_cap,
+        }
+
+        progress.update_status(agent_id, ticker, "Generating Pabrai analysis")
+        pabrai_output = await generate_pabrai_output_async(
+            ticker=ticker,
+            analysis_data=analysis_data,
+            state=state,
+            agent_id=agent_id,
+        )
+
+        pabrai_analysis[ticker] = {
+            "signal": pabrai_output.signal,
+            "confidence": pabrai_output.confidence,
+            "reasoning": pabrai_output.reasoning,
+        }
+
+        progress.update_status(agent_id, ticker, "Done", analysis=pabrai_output.reasoning)
+
+    message = HumanMessage(content=json.dumps(pabrai_analysis), name=agent_id)
+
+    if state["metadata"]["show_reasoning"]:
+        show_agent_reasoning(pabrai_analysis, "Mohnish Pabrai Agent")
+
+    progress.update_status(agent_id, None, "Done")
+
+    await update_analyst_signals_async(state, agent_id, pabrai_analysis)
 
     return {"messages": [message], "data": state["data"]}
 
@@ -197,7 +302,7 @@ def analyze_pabrai_valuation(financial_line_items: list, market_cap: float | Non
     if not fcf_values or len(fcf_values) < 3:
         return {"score": 0, "details": "Insufficient FCF history", "fcf_yield": None, "normalized_fcf": None}
 
-    normalized_fcf = sum(fcf_values[:min(5, len(fcf_values))]) / min(5, len(fcf_values))
+    normalized_fcf = sum(fcf_values[: min(5, len(fcf_values))]) / min(5, len(fcf_values))
     if normalized_fcf <= 0:
         return {"score": 0, "details": "Non-positive normalized FCF", "fcf_yield": None, "normalized_fcf": normalized_fcf}
 
@@ -302,10 +407,11 @@ def generate_pabrai_output(
     agent_id: str,
 ) -> MohnishPabraiSignal:
     """Generate Pabrai-style decision focusing on low risk, high uncertainty bets and cloning."""
-    template = ChatPromptTemplate.from_messages([
-        (
-          "system",
-          """You are Mohnish Pabrai. Apply my value investing philosophy:
+    template = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """You are Mohnish Pabrai. Apply my value investing philosophy:
 
           - Heads I win; tails I don't lose much: prioritize downside protection first.
           - Buy businesses with simple, understandable models and durable moats.
@@ -317,10 +423,10 @@ def generate_pabrai_output(
 
             Provide candid, checklist-driven reasoning, with emphasis on capital preservation and expected mispricing.
             """,
-        ),
-        (
-          "human",
-          """Analyze {ticker} using the provided data.
+            ),
+            (
+                "human",
+                """Analyze {ticker} using the provided data.
 
           DATA:
           {analysis_data}
@@ -332,13 +438,16 @@ def generate_pabrai_output(
             "reasoning": "string with Pabrai-style analysis focusing on downside protection, FCF yield, and doubling potential"
           }}
           """,
-        ),
-    ])
+            ),
+        ]
+    )
 
-    prompt = template.invoke({
-        "analysis_data": json.dumps(analysis_data, indent=2),
-        "ticker": ticker,
-    })
+    prompt = template.invoke(
+        {
+            "analysis_data": json.dumps(analysis_data, indent=2),
+            "ticker": ticker,
+        }
+    )
 
     def create_default_pabrai_signal():
         return MohnishPabraiSignal(signal="neutral", confidence=0.0, reasoning="Error in analysis, defaulting to neutral")
@@ -349,4 +458,62 @@ def generate_pabrai_output(
         pydantic_model=MohnishPabraiSignal,
         agent_name=agent_id,
         default_factory=create_default_pabrai_signal,
-    ) 
+    )
+
+
+async def generate_pabrai_output_async(
+    ticker: str,
+    analysis_data: dict[str, any],
+    state: AgentState,
+    agent_id: str,
+) -> MohnishPabraiSignal:
+    template = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """You are Mohnish Pabrai. Apply my value investing philosophy:
+
+          - Heads I win; tails I don't lose much: prioritize downside protection first.
+          - Buy businesses with simple, understandable models and durable moats.
+          - Demand high free cash flow yields and low leverage; prefer asset-light models.
+          - Look for situations where intrinsic value is rising and price is significantly lower.
+          - Favor cloning great investors' ideas and checklists over novelty.
+          - Seek potential to double capital in 2-3 years with low risk.
+          - Avoid leverage, complexity, and fragile balance sheets.
+          """,
+            ),
+            (
+                "human",
+                """Analyze {ticker} using the provided data.
+
+          DATA:
+          {analysis_data}
+
+          Return EXACTLY this JSON:
+          {{
+            "signal": "bullish" | "bearish" | "neutral",
+            "confidence": float (0-100),
+            "reasoning": "string with Pabrai-style analysis focusing on downside protection, FCF yield, and doubling potential"
+          }}
+          """,
+            ),
+        ]
+    )
+
+    prompt = template.invoke(
+        {
+            "analysis_data": json.dumps(analysis_data, indent=2),
+            "ticker": ticker,
+        }
+    )
+
+    def create_default_pabrai_signal():
+        return MohnishPabraiSignal(signal="neutral", confidence=0.0, reasoning="Error in analysis, defaulting to neutral")
+
+    return await async_call_llm(
+        prompt=prompt,
+        state=state,
+        pydantic_model=MohnishPabraiSignal,
+        agent_name=agent_id,
+        default_factory=create_default_pabrai_signal,
+    )

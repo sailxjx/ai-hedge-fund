@@ -1,5 +1,8 @@
 """Constants and utilities related to analysts configuration."""
 
+import importlib
+from typing import Callable
+
 from src.agents import portfolio_manager
 from src.agents.aswath_damodaran import aswath_damodaran_agent
 from src.agents.ben_graham import ben_graham_agent
@@ -7,8 +10,9 @@ from src.agents.bill_ackman import bill_ackman_agent
 from src.agents.breakout_cover_sentinel import breakout_cover_sentinel_agent
 from src.agents.cathie_wood import cathie_wood_agent
 from src.agents.charlie_munger import charlie_munger_agent
-from src.agents.downside_flow_sentinel import downside_flow_sentinel_agent
 from src.agents.crash_short_allocator import crash_short_allocator_agent
+from src.agents.downside_flow_sentinel import downside_flow_sentinel_agent
+from src.agents.donald_trump import donald_trump_agent
 from src.agents.event_catalyst import event_catalyst_agent
 from src.agents.fundamentals import fundamentals_analyst_agent
 from src.agents.growth_momentum import growth_momentum_agent
@@ -31,6 +35,7 @@ from src.agents.technicals import technical_analyst_agent
 from src.agents.trend_regime import trend_regime_agent
 from src.agents.valuation import valuation_analyst_agent
 from src.agents.warren_buffett import warren_buffett_agent
+from src.utils.runtime import async_personas_enabled
 
 # Define analyst configuration - single source of truth
 ANALYST_CONFIG = {
@@ -274,15 +279,39 @@ ANALYST_CONFIG = {
         "type": "analyst",
         "order": 28,
     },
+    "donald_trump": {
+        "display_name": "Donald Trump Analyst",
+        "description": "Populist policy shock persona",
+        "investing_style": "Trades tariffs, tax shifts, and media momentum with campaign-style conviction to exploit policy surprises.",
+        "agent_func": donald_trump_agent,
+        "type": "analyst",
+        "order": 29,
+    },
 }
+
+
+def _lookup_async_variant(agent_func):
+    module = importlib.import_module(agent_func.__module__)
+    async_name = f"{agent_func.__name__}_async"
+    return getattr(module, async_name, None)
+
 
 # Derive ANALYST_ORDER from ANALYST_CONFIG for backwards compatibility
 ANALYST_ORDER = [(config["display_name"], key) for key, config in sorted(ANALYST_CONFIG.items(), key=lambda x: x[1]["order"])]
 
 
-def get_analyst_nodes():
+def get_analyst_nodes(async_enabled: bool | None = None):
     """Get the mapping of analyst keys to their (node_name, agent_func) tuples."""
-    return {key: (f"{key}_agent", config["agent_func"]) for key, config in ANALYST_CONFIG.items()}
+    use_async = async_personas_enabled() if async_enabled is None else async_enabled
+    analyst_nodes: dict[str, tuple[str, Callable]] = {}
+    for key, config in ANALYST_CONFIG.items():
+        func = config["agent_func"]
+        if use_async:
+            async_candidate = config.get("agent_func_async") or _lookup_async_variant(func)
+            if async_candidate is not None:
+                func = async_candidate
+        analyst_nodes[key] = (f"{key}_agent", func)
+    return analyst_nodes
 
 
 def get_agents_list():

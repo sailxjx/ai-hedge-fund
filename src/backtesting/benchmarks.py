@@ -28,5 +28,3 @@ class BenchmarkCalculator:
             return (float(last_close) / float(first_close) - 1.0) * 100.0
         except Exception:
             return None
-
-

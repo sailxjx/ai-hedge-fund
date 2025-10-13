@@ -10,20 +10,20 @@ from typing import Any, Mapping
 import numpy as np
 from langchain_core.messages import HumanMessage
 
-from src.agents.persona_utils import persona_from_observations
+from src.agents.persona_utils import (
+    async_persona_from_observations,
+    persona_from_observations,
+)
 from src.graph.state import AgentState, show_agent_reasoning
-from src.tools.api import get_prices, prices_to_df
+from src.tools.api import get_prices, get_prices_async, prices_to_df, prices_to_df_async
 from src.utils.api_key import get_api_key_from_state
+from src.utils.async_state import update_analyst_signals_async
 from src.utils.progress import progress
-
 
 LOOKBACK_DAYS = 120
 PERSONA_NAME = "Orion"
 PERSONA_ROLE = "the crash-flight allocator guarding our downside hedges"
-PERSONA_BACKSTORY = (
-    "You are a battle-tested crash tactician who survived multiple liquidity shocks. "
-    "You weigh quantitative crash odds against market microstructure to size short allocations."
-)
+PERSONA_BACKSTORY = "You are a battle-tested crash tactician who survived multiple liquidity shocks. " "You weigh quantitative crash odds against market microstructure to size short allocations."
 ALLOWED_SIGNALS = ("monitor", "short_bias", "crash_short", "cover_short")
 PERSONA_INSTRUCTIONS = (
     "Lean into crash_short only when severity and probability align with the caps provided.",
@@ -257,11 +257,78 @@ def _compute_price_profile(state: AgentState, ticker: str) -> PriceProfile | Non
 
     severity = float(
         np.clip(
-            0.30 * ret5_component
-            + 0.22 * ret10_component
-            + 0.25 * drawdown_component
-            + 0.15 * vol_component
-            + 0.08 * slope_component,
+            0.30 * ret5_component + 0.22 * ret10_component + 0.25 * drawdown_component + 0.15 * vol_component + 0.08 * slope_component,
+            0.0,
+            1.6,
+        )
+    )
+
+    if severity >= 0.9 or ret_5 <= -0.07 or drawdown_60 <= -0.18:
+        stage = "crash"
+    elif severity >= 0.45 or ret_10 <= -0.04 or drawdown_30 <= -0.1:
+        stage = "downtrend"
+    else:
+        stage = "calm"
+
+    return PriceProfile(
+        close=float(close.iloc[-1]),
+        severity=severity,
+        stage=stage,
+        ret_5=ret_5,
+        ret_10=ret_10,
+        drawdown_30=drawdown_30,
+        drawdown_60=drawdown_60,
+        vol_ratio=vol_ratio,
+        slope_15=slope_15,
+    )
+
+
+async def _compute_price_profile_async(state: AgentState, ticker: str) -> PriceProfile | None:
+    data = state.get("data", {})
+    start_date = data.get("start_date")
+    end_date = data.get("end_date")
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+
+    fetch_start = _extend_start(start_date, LOOKBACK_DAYS)
+    prices = await get_prices_async(
+        ticker=ticker,
+        start_date=fetch_start or start_date,
+        end_date=end_date,
+        api_key=api_key,
+    )
+    if not prices:
+        return None
+
+    df = await prices_to_df_async(prices)
+    if df.empty:
+        return None
+
+    close = df["close"].astype(float).dropna()
+    if close.empty:
+        return None
+
+    ret_5 = _series_return(close, 5)
+    ret_10 = _series_return(close, 10)
+
+    drawdown_30 = _window_drawdown(close, 30)
+    drawdown_60 = _window_drawdown(close, 60)
+
+    returns = close.pct_change().dropna()
+    vol_5 = _annualized_std(returns, 5)
+    vol_20 = _annualized_std(returns, 20)
+    vol_ratio = float(vol_5 / max(vol_20, 1e-9) - 1.0) if vol_20 > 0 else 0.0
+
+    slope_15 = _normalized_slope(close, 15)
+
+    ret5_component = _bounded(max(0.0, -ret_5) / 0.05, 0.0, 1.3)
+    ret10_component = _bounded(max(0.0, -ret_10) / 0.08, 0.0, 1.2)
+    drawdown_component = _bounded(max(0.0, -drawdown_60) / 0.2, 0.0, 1.2)
+    vol_component = _bounded(max(0.0, vol_ratio) / 0.45, 0.0, 1.2)
+    slope_component = _bounded(max(0.0, -slope_15) / 0.015, 0.0, 1.0)
+
+    severity = float(
+        np.clip(
+            0.30 * ret5_component + 0.22 * ret10_component + 0.25 * drawdown_component + 0.15 * vol_component + 0.08 * slope_component,
             0.0,
             1.6,
         )
@@ -458,6 +525,166 @@ def _should_release_short(existing_short: int, inputs: CrashInputs, score: float
     return False, ""
 
 
+def _prepare_crash_observation(
+    *,
+    ticker: str,
+    analyst_signals: Mapping[str, Any],
+    portfolio: Mapping[str, Any],
+    positions: Mapping[str, Any],
+    price_profile: PriceProfile | None,
+    inputs: CrashInputs,
+    score: float,
+    price_severity: float,
+    fallback_total: float,
+    cash_balance: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build observation payloads for the crash short allocator persona."""
+
+    position = positions.get(ticker, {}) or {}
+    existing_long = int(_safe_float(position.get("long"), 0.0))
+    existing_short = int(_safe_float(position.get("short"), 0.0))
+
+    peer_short_cap_pct, peer_short_cap_source = _min_constraint_pct(analyst_signals, ticker, "max_short_exposure_pct", "crash_short_allocator_agent")
+    peer_position_cap_pct, peer_position_cap_source = _min_constraint_pct(analyst_signals, ticker, "max_long_exposure_pct", "crash_short_allocator_agent")
+
+    release_short, release_reason = _should_release_short(existing_short, inputs, score)
+    raw_allocation_pct = 0.0 if release_short else _short_allocation(score, price_severity, inputs)
+
+    regime_payload = (analyst_signals.get("regime_meta_agent") or {}).get(ticker, {})
+    macro_payload = (analyst_signals.get("macro_volatility_sentinel_agent") or {}).get(ticker, {})
+    downside_payload = (analyst_signals.get("downside_flow_sentinel_agent") or {}).get(ticker, {})
+
+    price_hint = None
+    if price_profile and price_profile.close > 0:
+        price_hint = price_profile.close
+    if price_hint is None:
+        price_hint = _extract_close(regime_payload, macro_payload, downside_payload)
+
+    total_equity = fallback_total
+    if total_equity <= 0 and price_hint:
+        total_equity = cash_balance + existing_long * price_hint
+    if total_equity <= 0:
+        total_equity = max(cash_balance, 100_000.0)
+
+    long_cap_pct = float(np.clip(0.05 - 0.025 * (score + price_severity), 0.0, 0.05))
+    margin_cap_pct = _infer_margin_cap_pct(portfolio, price_hint, total_equity)
+
+    cap_candidates: list[tuple[float | None, str]] = [
+        (raw_allocation_pct, "model_allocation"),
+        (float(np.clip(0.14 + score * 0.25 + price_severity * 0.15, 0.14, 0.55)), "allocator_short_cap"),
+        (peer_short_cap_pct, f"peer_short_cap:{peer_short_cap_source}" if peer_short_cap_source else "peer_short_cap"),
+        (margin_cap_pct, "margin_capacity"),
+    ]
+
+    effective_allocation_pct, allocation_limiter = _select_allocation_cap(cap_candidates)
+    if release_short:
+        effective_allocation_pct = 0.0
+
+    raw_target_short_shares: int | None = None
+    if price_hint is not None and raw_allocation_pct > 0:
+        raw_target_notional = total_equity * raw_allocation_pct
+        raw_target_short_shares = max(1, int(np.floor(raw_target_notional / price_hint)))
+
+    target_short_shares_estimate: int | None = None
+    if price_hint is not None and effective_allocation_pct > 0:
+        target_notional = total_equity * effective_allocation_pct
+        target_short_shares_estimate = max(1, int(np.floor(target_notional / price_hint)))
+
+    long_cap_effective = long_cap_pct
+    if peer_position_cap_pct is not None:
+        long_cap_effective = min(long_cap_effective, peer_position_cap_pct)
+    long_cap_effective = max(0.0, long_cap_effective)
+
+    observation = {
+        "ticker": ticker,
+        "composite_score": score,
+        "price_severity": price_severity,
+        "existing_positions": {"long": existing_long, "short": existing_short},
+        "crash_inputs": {
+            "crash_prob": inputs.crash_prob,
+            "macro_score": inputs.macro_score,
+            "downside_score": inputs.downside_score,
+            "trend_bias": inputs.trend_bias,
+            "event_bias": inputs.event_bias,
+            "downside_stage": inputs.downside_stage,
+            "macro_stage": inputs.macro_stage,
+        },
+        "price_profile": (
+            {
+                "close": price_profile.close,
+                "severity": price_profile.severity,
+                "stage": price_profile.stage,
+                "ret_5": price_profile.ret_5,
+                "ret_10": price_profile.ret_10,
+                "drawdown_30": price_profile.drawdown_30,
+                "drawdown_60": price_profile.drawdown_60,
+                "vol_ratio": price_profile.vol_ratio,
+                "slope_15": price_profile.slope_15,
+            }
+            if price_profile
+            else None
+        ),
+        "release_analysis": {
+            "should_release": release_short,
+            "reason": release_reason,
+        },
+        "allocation_model": {
+            "raw_allocation_pct": raw_allocation_pct,
+            "effective_allocation_pct": effective_allocation_pct,
+            "allocation_limiter": allocation_limiter,
+            "allocation_candidates": [
+                {"label": label, "value": value} for value, label in cap_candidates
+            ],
+            "raw_target_short_shares_estimate": raw_target_short_shares,
+            "target_short_shares_estimate": target_short_shares_estimate,
+            "price_hint": price_hint,
+            "total_equity_estimate": total_equity,
+        },
+        "caps": {
+            "long_cap_pct": long_cap_pct,
+            "long_cap_effective": long_cap_effective,
+            "margin_cap_pct": margin_cap_pct,
+            "peer_short_cap_pct": peer_short_cap_pct,
+            "peer_short_cap_source": peer_short_cap_source,
+            "peer_position_cap_pct": peer_position_cap_pct,
+            "peer_position_cap_source": peer_position_cap_source,
+        },
+        "financials": {
+            "cash_balance": cash_balance,
+            "fallback_total": fallback_total,
+        },
+    }
+
+    indicators = {
+        "crash_prob": inputs.crash_prob,
+        "macro_score": inputs.macro_score,
+        "downside_score": inputs.downside_score,
+        "trend_bias": inputs.trend_bias,
+        "event_bias": inputs.event_bias,
+        "downside_stage": inputs.downside_stage,
+        "macro_stage": inputs.macro_stage,
+        "price_stage": price_profile.stage if price_profile else None,
+        "price_severity": price_severity,
+        "composite_score": score,
+        "raw_allocation_pct": raw_allocation_pct,
+        "effective_allocation_pct": effective_allocation_pct,
+        "allocation_limiter": allocation_limiter,
+        "raw_target_short_shares_estimate": raw_target_short_shares,
+        "target_short_shares_estimate": target_short_shares_estimate,
+        "release_short": release_short,
+        "price_hint": price_hint,
+        "long_cap_pct": long_cap_pct,
+        "long_cap_effective": long_cap_effective,
+        "margin_cap_pct": margin_cap_pct,
+        "peer_short_cap_pct": peer_short_cap_pct,
+        "peer_short_cap_source": peer_short_cap_source,
+        "peer_position_cap_pct": peer_position_cap_pct,
+        "peer_position_cap_source": peer_position_cap_source,
+    }
+
+    return observation, indicators
+
+
 def crash_short_allocator_agent(state: AgentState, agent_id: str = "crash_short_allocator_agent"):
     """Convert crash diagnostics into explicit short targets for risk management."""
 
@@ -479,249 +706,19 @@ def crash_short_allocator_agent(state: AgentState, agent_id: str = "crash_short_
         inputs = _collect_inputs(analyst_signals, ticker, price_profile)
         score = _composite_score(inputs)
         price_severity = price_profile.severity if price_profile else 0.0
-        position = positions.get(ticker, {}) or {}
-        existing_long = int(_safe_float(position.get("long"), 0.0))
-        existing_short = int(_safe_float(position.get("short"), 0.0))
 
-        peer_short_cap_pct, peer_short_cap_source = _min_constraint_pct(
-            analyst_signals, ticker, "max_short_exposure_pct", agent_id
+        observation, indicators = _prepare_crash_observation(
+            ticker=ticker,
+            analyst_signals=analyst_signals,
+            portfolio=portfolio,
+            positions=positions,
+            price_profile=price_profile,
+            inputs=inputs,
+            score=score,
+            price_severity=price_severity,
+            fallback_total=fallback_total,
+            cash_balance=cash_balance,
         )
-        peer_position_cap_pct, peer_position_cap_source = _min_constraint_pct(
-            analyst_signals, ticker, "max_long_exposure_pct", agent_id
-        )
-
-        release_short, release_reason = _should_release_short(existing_short, inputs, score)
-        raw_allocation_pct = (
-            0.0 if release_short else _short_allocation(score, price_severity, inputs)
-        )
-
-        regime_payload = (analyst_signals.get("regime_meta_agent") or {}).get(ticker, {})
-        macro_payload = (analyst_signals.get("macro_volatility_sentinel_agent") or {}).get(ticker, {})
-        downside_payload = (analyst_signals.get("downside_flow_sentinel_agent") or {}).get(ticker, {})
-
-        price_hint = None
-        if price_profile and price_profile.close > 0:
-            price_hint = price_profile.close
-        if price_hint is None:
-            price_hint = _extract_close(regime_payload, macro_payload, downside_payload)
-
-        total_equity = fallback_total
-        if total_equity <= 0 and price_hint:
-            total_equity = cash_balance + existing_long * price_hint
-        if total_equity <= 0:
-            total_equity = max(cash_balance, 100_000.0)
-
-        long_cap_pct = float(
-            np.clip(0.05 - 0.025 * (score + price_severity), 0.0, 0.05)
-        )
-        margin_cap_pct = _infer_margin_cap_pct(portfolio, price_hint, total_equity)
-
-        constraints: dict[str, Any] = {}
-        reasoning_parts = [
-            f"crash_prob {inputs.crash_prob:.0%}",
-            f"macro_score {inputs.macro_score:.2f}",
-            f"downside_score {inputs.downside_score:.2f}",
-            f"price_severity {price_severity:.2f}",
-            f"composite {score:.2f}",
-        ]
-
-        signal: str
-        confidence: int
-
-        cap_candidates: list[tuple[float | None, str]] = [
-            (raw_allocation_pct, "allocator allocation"),
-            (float(np.clip(0.14 + score * 0.25 + price_severity * 0.15, 0.14, 0.55)), "allocator short cap"),
-            (peer_short_cap_pct, f"{peer_short_cap_source} short cap" if peer_short_cap_source else "peer short cap"),
-            (margin_cap_pct, "margin capacity"),
-        ]
-
-        effective_allocation_pct, allocation_limiter = _select_allocation_cap(cap_candidates)
-
-        raw_target_short_shares: int | None = None
-        if price_hint is not None and raw_allocation_pct > 0:
-            raw_target_notional = total_equity * raw_allocation_pct
-            raw_target_short_shares = int(np.floor(raw_target_notional / price_hint))
-            if raw_target_short_shares <= existing_short:
-                if existing_short > 0:
-                    raw_target_short_shares = existing_short
-                else:
-                    raw_target_short_shares = int(np.ceil(raw_target_notional / price_hint))
-            raw_target_short_shares = max(raw_target_short_shares, 1)
-
-        if raw_allocation_pct > 0 and effective_allocation_pct < raw_allocation_pct:
-            reasoning_parts.append(
-                f"allocation clipped to {effective_allocation_pct:.2%} by {allocation_limiter}"
-            )
-
-        effective_allocation_pct = 0.0 if release_short else effective_allocation_pct
-
-        if effective_allocation_pct <= 0 or price_hint is None:
-            signal = "monitor"
-            confidence = int(round(52 + score * 18 + price_severity * 12))
-            if release_short:
-                signal = "cover_short"
-                cover_confidence = int(round(65 + max(0.0, 0.5 - score) * 40))
-                confidence = max(confidence, min(cover_confidence, 95))
-                constraints.update(
-                    {
-                        "preferred_direction": "neutral",
-                        "allow_short": True,
-                        "target_short_shares": 0,
-                        "max_additional_short_shares": 0,
-                        "max_short_exposure_pct": 0.0,
-                    }
-                )
-                constraints.setdefault("block_new_shorts", True)
-                if existing_short > 0:
-                    constraints["force_cover_qty"] = existing_short
-                    if release_reason:
-                        constraints["force_cover_reason"] = release_reason
-                    else:
-                        constraints.setdefault(
-                            "force_cover_reason", "Crash allocator releasing short exposure"
-                        )
-                if raw_target_short_shares is not None:
-                    constraints["raw_target_short_shares"] = raw_target_short_shares
-                reasoning_parts.append(
-                    release_reason or "stand-down: crash score no longer justifies short bias"
-                )
-            if price_hint is None:
-                reasoning_parts.append("missing price hint; skipping explicit short target")
-        else:
-            target_notional = total_equity * effective_allocation_pct
-            target_short_shares = int(np.floor(target_notional / price_hint))
-            if target_short_shares <= existing_short:
-                target_short_shares = existing_short if existing_short > 0 else int(np.ceil(target_notional / price_hint))
-            target_short_shares = max(target_short_shares, 1)
-
-            base_short_cap_pct = float(
-                np.clip(0.14 + score * 0.25 + price_severity * 0.15, 0.14, 0.55)
-            )
-            if peer_short_cap_pct is not None:
-                base_short_cap_pct = min(base_short_cap_pct, peer_short_cap_pct)
-            base_short_cap_pct = min(base_short_cap_pct, effective_allocation_pct)
-            base_short_cap_pct = max(0.0, base_short_cap_pct)
-
-            trimmed_long = max(
-                0, int(np.floor(existing_long * max(0.0, 1.0 - (score + price_severity) / 2)))
-            )
-
-            long_cap_effective = long_cap_pct
-            if peer_position_cap_pct is not None:
-                long_cap_effective = min(long_cap_effective, peer_position_cap_pct)
-            long_cap_effective = max(0.0, long_cap_effective)
-
-            constraints.update(
-                {
-                    "preferred_direction": "short",
-                    "allow_short": True,
-                    "max_long_exposure_pct": long_cap_effective,
-                    "max_additional_long_shares": 0,
-                    "max_long_shares": trimmed_long,
-                    "max_short_exposure_pct": base_short_cap_pct,
-                    "target_short_shares": target_short_shares,
-                    "max_additional_short_shares": max(0, target_short_shares - existing_short),
-                    "reference_price": price_hint,
-                }
-            )
-            if raw_target_short_shares is not None:
-                constraints["raw_target_short_shares"] = raw_target_short_shares
-
-            confidence = int(round(70 + score * 20 + price_severity * 18))
-            if inputs.macro_stage == "crash_alert":
-                confidence = min(confidence + 6, 100)
-            if inputs.downside_stage == "crash_flow":
-                confidence = min(confidence + 4, 100)
-            if price_profile and price_profile.stage == "crash":
-                confidence = min(confidence + 6, 100)
-
-            signal = "crash_short" if score >= 0.5 or price_severity >= 0.75 else "short_bias"
-            reasoning_parts.append(
-                f"target_short_shares {constraints['target_short_shares']} @ price {price_hint:.2f}"
-            )
-
-        if price_hint is not None:
-            constraints.setdefault("reference_price", price_hint)
-
-        auto_signal = signal
-        auto_confidence = max(0, min(confidence, 100))
-        auto_reasoning = "; ".join(reasoning_parts)
-        auto_constraints = dict(constraints)
-
-        payload = {
-            "signal": auto_signal,
-            "confidence": auto_confidence,
-            "score": round(score, 4),
-            "allocation_pct": round(effective_allocation_pct, 4),
-            "reasoning": auto_reasoning,
-            "constraints": auto_constraints,
-            "auto_reasoning": auto_reasoning,
-            "indicators": {
-                "crash_prob": inputs.crash_prob,
-                "macro_score": inputs.macro_score,
-                "downside_score": inputs.downside_score,
-                "trend_bias": inputs.trend_bias,
-                "macro_stage": inputs.macro_stage,
-                "downside_stage": inputs.downside_stage,
-                "event_bias": inputs.event_bias,
-                "price_severity": price_severity,
-                "price_stage": inputs.price_profile.stage if inputs.price_profile else None,
-                "auto_allocation_pct": effective_allocation_pct,
-                "raw_allocation_pct": raw_allocation_pct,
-                "allocation_limiter": allocation_limiter,
-                "raw_target_short_shares": raw_target_short_shares,
-                "peer_short_cap_pct": peer_short_cap_pct,
-                "peer_short_cap_source": peer_short_cap_source,
-                "peer_position_cap_pct": peer_position_cap_pct,
-                "peer_position_cap_source": peer_position_cap_source,
-                "margin_cap_pct": margin_cap_pct,
-            },
-        }
-
-        observations = {
-            "ticker": ticker,
-            "composite_score": score,
-            "price_severity": price_severity,
-            "existing_positions": {"long": existing_long, "short": existing_short},
-            "raw_allocation_pct": raw_allocation_pct,
-            "effective_allocation_pct": effective_allocation_pct,
-            "release_short": release_short,
-            "release_reason": release_reason,
-            "inputs": {
-                "crash_prob": inputs.crash_prob,
-                "macro_score": inputs.macro_score,
-                "downside_score": inputs.downside_score,
-                "trend_bias": inputs.trend_bias,
-                "event_bias": inputs.event_bias,
-                "downside_stage": inputs.downside_stage,
-                "macro_stage": inputs.macro_stage,
-                "price_profile": (
-                    {
-                        "close": inputs.price_profile.close,
-                        "severity": inputs.price_profile.severity,
-                        "stage": inputs.price_profile.stage,
-                        "ret_5": inputs.price_profile.ret_5,
-                        "ret_10": inputs.price_profile.ret_10,
-                        "drawdown_30": inputs.price_profile.drawdown_30,
-                        "drawdown_60": inputs.price_profile.drawdown_60,
-                        "vol_ratio": inputs.price_profile.vol_ratio,
-                        "slope_15": inputs.price_profile.slope_15,
-                    }
-                    if inputs.price_profile
-                    else None
-                ),
-            },
-            "caps": {
-                "peer_short_cap_pct": peer_short_cap_pct,
-                "peer_position_cap_pct": peer_position_cap_pct,
-                "margin_cap_pct": margin_cap_pct,
-                "allocation_limiter": allocation_limiter,
-            },
-            "suggested_constraints": dict(auto_constraints),
-            "auto_signal_hint": auto_signal,
-            "auto_confidence_hint": auto_confidence,
-            "auto_reasoning": auto_reasoning,
-        }
 
         decision = persona_from_observations(
             state=state,
@@ -730,36 +727,36 @@ def crash_short_allocator_agent(state: AgentState, agent_id: str = "crash_short_
             persona_role=PERSONA_ROLE,
             persona_backstory=PERSONA_BACKSTORY,
             allowed_signals=ALLOWED_SIGNALS,
-            observations=observations,
+            observations=observation,
             persona_instructions=PERSONA_INSTRUCTIONS,
-            default_signal="observe",
+            default_signal="monitor",
             default_confidence=55.0,
-            default_reasoning="Defaulted to observe after observation-only fallback.",
+            default_reasoning="Defaulted to monitor after observation-only fallback.",
         )
 
-        payload.update(
-            {
-                "signal": decision.signal,
-                "confidence": int(max(0, min(round(decision.confidence), 100))),
-                "reasoning": decision.reasoning,
-                "constraints": decision.constraints or {},
-            }
-        )
-        payload.setdefault("meta", {})
-        payload["meta"]["observations"] = observations
-        if "allocation_pct" in payload["constraints"]:
-            try:
-                payload["allocation_pct"] = float(payload["constraints"]["allocation_pct"])
-            except (TypeError, ValueError):
-                pass
+        allocation_pct = 0.0
+        if decision.constraints:
+            for key in ("allocation_pct", "max_short_exposure_pct"):
+                if key in decision.constraints:
+                    try:
+                        allocation_pct = float(decision.constraints[key])
+                    except (TypeError, ValueError):
+                        allocation_pct = 0.0
+                    break
 
-        payload["indicators"]["allocation_pct"] = payload["allocation_pct"]
+        payload: dict[str, Any] = {
+            "signal": decision.signal,
+            "confidence": int(max(0, min(round(decision.confidence), 100))),
+            "allocation_pct": allocation_pct,
+            "reasoning": decision.reasoning,
+            "constraints": decision.constraints or {},
+            "indicators": indicators,
+            "meta": {"observations": observation},
+        }
 
-        progress.update_status(
-            agent_id,
-            ticker,
-            f"{decision.signal.upper()} @ {payload['confidence']}/100 | alloc {payload['allocation_pct']:.2%}",
-        )
+        payload["indicators"]["allocation_pct"] = allocation_pct
+
+        progress.update_status(agent_id, ticker, f"{decision.signal.upper()} @ {payload['confidence']}/100 | alloc {allocation_pct:.2%}")
 
         allocator_payload[ticker] = payload
 
@@ -777,23 +774,93 @@ def crash_short_allocator_agent(state: AgentState, agent_id: str = "crash_short_
     }
 
 
-def _extract_close(*payloads: Mapping[str, Any]) -> float | None:
-    """Return the first usable close price from supplied analyst payloads."""
+async def crash_short_allocator_agent_async(state: AgentState, agent_id: str = "crash_short_allocator_agent"):
+    """Convert crash diagnostics into explicit short targets for risk management."""
 
-    for payload in payloads:
-        if not isinstance(payload, Mapping):
-            continue
-        metrics = payload.get("metrics")
-        if isinstance(metrics, Mapping) and "close" in metrics:
-            close = _safe_float(metrics.get("close"))
-            if close > 0:
-                return close
-        indicators = payload.get("indicators")
-        if isinstance(indicators, Mapping) and "close" in indicators:
-            close = _safe_float(indicators.get("close"))
-            if close > 0:
-                return close
-    return None
+    data = state.get("data", {})
+    tickers = data.get("tickers", [])
+    portfolio = data.get("portfolio", {}) or {}
+    positions = portfolio.get("positions", {}) or {}
+    analyst_signals = data.setdefault("analyst_signals", {})
 
+    cash_balance = _safe_float(portfolio.get("cash"), 0.0)
+    fallback_total = _safe_float(portfolio.get("total_value"), cash_balance)
 
-__all__ = ["crash_short_allocator_agent"]
+    allocator_payload: dict[str, dict[str, Any]] = {}
+
+    for ticker in tickers:
+        progress.update_status(agent_id, ticker, "Evaluating crash allocation")
+
+        price_profile = await _compute_price_profile_async(state, ticker)
+        inputs = _collect_inputs(analyst_signals, ticker, price_profile)
+        score = _composite_score(inputs)
+        price_severity = price_profile.severity if price_profile else 0.0
+
+        observation, indicators = _prepare_crash_observation(
+            ticker=ticker,
+            analyst_signals=analyst_signals,
+            portfolio=portfolio,
+            positions=positions,
+            price_profile=price_profile,
+            inputs=inputs,
+            score=score,
+            price_severity=price_severity,
+            fallback_total=fallback_total,
+            cash_balance=cash_balance,
+        )
+
+        decision = await async_persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observation,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="monitor",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to monitor after observation-only fallback.",
+        )
+
+        allocation_pct = 0.0
+        if decision.constraints:
+            for key in ("allocation_pct", "max_short_exposure_pct"):
+                if key in decision.constraints:
+                    try:
+                        allocation_pct = float(decision.constraints[key])
+                    except (TypeError, ValueError):
+                        allocation_pct = 0.0
+                    break
+
+        confidence = int(max(0, min(round(decision.confidence), 100)))
+        payload: dict[str, Any] = {
+            "signal": decision.signal,
+            "confidence": confidence,
+            "allocation_pct": allocation_pct,
+            "reasoning": decision.reasoning,
+            "constraints": decision.constraints or {},
+            "indicators": indicators,
+            "meta": {"observations": observation},
+        }
+
+        payload["indicators"]["allocation_pct"] = allocation_pct
+
+        progress.update_status(agent_id, ticker, f"{decision.signal.upper()} @ {confidence}/100 | alloc {allocation_pct:.2%}")
+
+        allocator_payload[ticker] = payload
+
+    message = HumanMessage(content=json.dumps(allocator_payload), name=agent_id)
+
+    if state.get("metadata", {}).get("show_reasoning"):
+        show_agent_reasoning(allocator_payload, "Crash Short Allocator")
+
+    await update_analyst_signals_async(state, agent_id, allocator_payload)
+    progress.update_status(agent_id, None, "Done")
+
+    return {
+        "messages": state.get("messages", []) + [message],
+        "data": state["data"],
+    }
+
+__all__ = ["crash_short_allocator_agent", "crash_short_allocator_agent_async"]

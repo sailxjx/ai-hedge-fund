@@ -12,7 +12,6 @@ from typing import Iterable
 
 import pandas as pd
 
-
 ISSUE_ALIASES: dict[str, str] = {
     "preferred short": "direction_conflict",
     "preferred long": "direction_conflict",
@@ -39,11 +38,7 @@ class Summary:
             "rows_analyzed": self.rows_analyzed,
             "compliant_count": self.compliant_count,
             "non_compliant_count": self.non_compliant_count,
-            "non_compliant_ratio": round(
-                self.non_compliant_count / self.rows_analyzed, 4
-            )
-            if self.rows_analyzed
-            else 0.0,
+            "non_compliant_ratio": round(self.non_compliant_count / self.rows_analyzed, 4) if self.rows_analyzed else 0.0,
             "issue_counts": self.issue_counts,
             "issue_dates": self.issue_dates,
             "max_target_short_excess": self.max_target_short_excess,
@@ -59,17 +54,13 @@ class Summary:
             f"- Non-compliant rows: {self.non_compliant_count} ({self._ratio_pct():.2f}%)",
         ]
         if self.max_target_short_excess is not None:
-            lines.append(
-                f"- Max excess vs target_short_shares: {self.max_target_short_excess:.0f} shares"
-            )
+            lines.append(f"- Max excess vs target_short_shares: {self.max_target_short_excess:.0f} shares")
         if self.most_recent_violation:
             lines.append(f"- Most recent violation: {self.most_recent_violation}")
 
         if self.issue_counts:
             lines.append("\n## Issue Breakdown")
-            for issue, count in sorted(
-                self.issue_counts.items(), key=lambda item: item[1], reverse=True
-            ):
+            for issue, count in sorted(self.issue_counts.items(), key=lambda item: item[1], reverse=True):
                 lines.append(f"- {issue.replace('_', ' ').title()}: {count}")
 
         if self.issue_dates:
@@ -87,9 +78,7 @@ class Summary:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Summarise compliance issues from risk override audit CSV files."
-    )
+    parser = argparse.ArgumentParser(description="Summarise compliance issues from risk override audit CSV files.")
     parser.add_argument(
         "--input",
         nargs="+",
@@ -122,13 +111,7 @@ def load_frames(paths: Iterable[str]) -> pd.DataFrame:
 
 
 def normalise_boolean(series: pd.Series) -> pd.Series:
-    return (
-        series.fillna(False)
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .isin({"true", "1", "yes"})
-    )
+    return series.fillna(False).astype(str).str.strip().str.lower().isin({"true", "1", "yes"})
 
 
 def extract_issue_labels(issue_text: str) -> set[str]:
@@ -166,11 +149,7 @@ def summarise(df: pd.DataFrame, inputs: list[str]) -> Summary:
         issues_raw = str(row.get("issues", "")).strip()
         labels = extract_issue_labels(issues_raw)
         date_val = row.get("date")
-        date_str = (
-            date_val.strftime("%Y-%m-%d")
-            if isinstance(date_val, pd.Timestamp) and not pd.isna(date_val)
-            else "unknown"
-        )
+        date_str = date_val.strftime("%Y-%m-%d") if isinstance(date_val, pd.Timestamp) and not pd.isna(date_val) else "unknown"
         for label in labels:
             issue_counter[label] += 1
             issue_dates[label].append(date_str)

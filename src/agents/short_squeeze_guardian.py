@@ -9,19 +9,20 @@ import numpy as np
 import pandas as pd
 from langchain_core.messages import HumanMessage
 
-from src.agents.persona_utils import persona_from_observations
+from src.agents.persona_utils import (
+    async_persona_from_observations,
+    persona_from_observations,
+)
 from src.graph.state import AgentState, show_agent_reasoning
-from src.tools.api import get_prices, prices_to_df
+from src.tools.api import get_prices, get_prices_async, prices_to_df, prices_to_df_async
 from src.utils.api_key import get_api_key_from_state
+from src.utils.async_state import update_analyst_signals_async
 from src.utils.progress import progress
-
 
 EPSILON = 1e-9
 PERSONA_NAME = "Nyx"
 PERSONA_ROLE = "an anthropomorphic squeeze guardian who shields the book from violent upside reversals"
-PERSONA_BACKSTORY = (
-    "Nyx once ran a discretionary short book and earned her scars from brutal squeezes; now she blends tape-reading intuition with quantitative cues to guard the fund."
-)
+PERSONA_BACKSTORY = "Nyx once ran a discretionary short book and earned her scars from brutal squeezes; now she blends tape-reading intuition with quantitative cues to guard the fund."
 PERSONA_INSTRUCTIONS = (
     "Emphasize velocity, breadth of upside momentum, and volume surges when determining squeeze risk.",
     "Force full covers only when momentum and positioning metrics shout danger; otherwise recommend trims or guidance.",
@@ -42,15 +43,6 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def _bounded_score(value: float, scale: float, cap: float = 1.0) -> float:
-    if not np.isfinite(value):
-        return 0.0
-    if scale <= 0:
-        return 0.0
-    normalised = value / scale
-    return float(np.clip(normalised, 0.0, cap))
 
 
 def _compute_features(df: pd.DataFrame) -> dict[str, float]:
@@ -110,6 +102,48 @@ def _compute_features(df: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def _prepare_observation(
+    *,
+    df: pd.DataFrame | None,
+    ticker: str,
+    current_short: int,
+) -> tuple[dict[str, Any], dict[str, float]]:
+    notes: list[str] = []
+    features: dict[str, float] = {}
+    data_status = "missing_prices"
+
+    if df is None:
+        notes.append("No price history retrieved for squeeze diagnostics.")
+    else:
+        if df.empty or len(df) < 15:
+            data_status = "insufficient_history"
+            notes.append("Need at least 15 observations to evaluate squeeze risk.")
+        else:
+            features = _compute_features(df)
+            if not features:
+                data_status = "feature_extraction_failed"
+                notes.append("Unable to derive squeeze metrics from the recent window.")
+            else:
+                data_status = "data_ready"
+                notes.append(
+                    "Squeeze diagnostics: "
+                    f"ret_5 {features['ret_5']:.1%}, "
+                    f"velocity_z {features['velocity_z']:.2f}, "
+                    f"volume_ratio {features['volume_ratio']:+.2f}, "
+                    f"gap_vs_high {features['gap_vs_high']:.1%}."
+                )
+
+    observations = {
+        "ticker": ticker,
+        "current_short_shares": current_short,
+        "data_status": data_status,
+        "squeeze_features": {key: float(val) for key, val in features.items()} if features else {},
+        "diagnostic_notes": notes,
+    }
+
+    return observations, features
+
+
 def short_squeeze_guardian_agent(state: AgentState, agent_id: str = "short_squeeze_guardian_agent"):
     """Detect aggressive upside squeezes and enforce defensive short constraints."""
 
@@ -118,7 +152,7 @@ def short_squeeze_guardian_agent(state: AgentState, agent_id: str = "short_squee
     start_date = data["start_date"]
     end_date = data["end_date"]
     portfolio = data.get("portfolio", {})
-    positions = (portfolio.get("positions") or {})
+    positions = portfolio.get("positions") or {}
     api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
 
     guardian_view: dict[str, dict[str, Any]] = {}
@@ -132,123 +166,10 @@ def short_squeeze_guardian_agent(state: AgentState, agent_id: str = "short_squee
             api_key=api_key,
         )
 
-        features: dict[str, float] = {}
-        squeeze_score = 0.0
         current_short = int(_safe_float((positions.get(ticker, {}) or {}).get("short", 0), 0.0))
-
-        auto_signal = "no_data"
-        auto_confidence = 0
-        auto_reasoning = "No price history available to evaluate squeeze risk."
-        auto_constraints: dict[str, Any] = {}
-        component_breakdown: dict[str, float] = {}
-
-        if not prices:
-            progress.update_status(agent_id, ticker, "Failed: Missing price data")
-        else:
-            df = prices_to_df(prices)
-            if df.empty or len(df) < 15:
-                auto_signal = "insufficient_history"
-                auto_confidence = 20
-                auto_reasoning = "Need at least 15 sessions to size squeeze risk."
-                progress.update_status(agent_id, ticker, "Failed: Insufficient history")
-            else:
-                features = _compute_features(df)
-                if not features:
-                    auto_signal = "no_features"
-                    auto_confidence = 15
-                    auto_reasoning = "Unable to derive squeeze metrics from the recent history."
-                    progress.update_status(agent_id, ticker, "Failed: Feature extraction")
-                else:
-                    velocity_component = _bounded_score(max(0.0, features["velocity_z"]), 2.5)
-                    momentum_component = _bounded_score(max(0.0, features["ret_10"]), 0.12)
-                    gap_high_component = _bounded_score(max(0.0, features["gap_vs_high"]), 0.03)
-                    gap_ma_component = _bounded_score(max(0.0, features["gap_vs_ma"]), 0.08)
-                    volume_component = _bounded_score(max(0.0, features["volume_ratio"]), 1.0)
-                    acceleration_component = _bounded_score(max(0.0, features["acceleration"]), 0.08)
-                    range_component = _bounded_score(max(0.0, features["range_ratio"]), 0.02)
-
-                    squeeze_score = (
-                        0.30 * velocity_component
-                        + 0.20 * momentum_component
-                        + 0.15 * gap_high_component
-                        + 0.10 * gap_ma_component
-                        + 0.10 * volume_component
-                        + 0.10 * acceleration_component
-                        + 0.05 * range_component
-                    )
-                    squeeze_score = float(np.clip(squeeze_score, 0.0, 1.25))
-
-                    if squeeze_score >= 0.70:
-                        auto_signal = "squeeze_warning"
-                    elif squeeze_score >= 0.45:
-                        auto_signal = "elevated_risk"
-                    else:
-                        auto_signal = "calm"
-
-                    auto_confidence = int(round(min(1.0, squeeze_score) * 100))
-
-                    auto_constraints = {}
-                    reasoning_parts = [
-                        f"5d {features['ret_5']:.1%}",
-                        f"10d {features['ret_10']:.1%}",
-                        f"vel_z {features['velocity_z']:.2f}",
-                        f"vol/avg {features['volume_ratio'] + 1:.2f}x",
-                    ]
-                    auto_reasoning = "; ".join(reasoning_parts)
-
-                    if auto_signal == "squeeze_warning":
-                        auto_constraints.update(
-                            {
-                                "allow_short": False,
-                                "block_new_shorts": True,
-                                "max_short_exposure_pct": 0.0,
-                                "target_short_shares": 0,
-                            }
-                        )
-                        if current_short > 0:
-                            auto_constraints["force_cover_qty"] = current_short
-                            auto_constraints["force_cover_reason"] = "Short squeeze guardian triggered"
-                    elif auto_signal == "elevated_risk":
-                        auto_constraints.update(
-                            {
-                                "allow_short": True,
-                                "max_short_exposure_pct": 0.03,
-                                "block_new_shorts": True,
-                            }
-                        )
-                        if current_short > 0:
-                            trimmed_target = max(0, int(np.floor(current_short * 0.4)))
-                            auto_constraints["target_short_shares"] = trimmed_target
-                            auto_constraints["force_cover_reason"] = "Short squeeze risk trimming"
-                    else:
-                        auto_constraints.update(
-                            {
-                                "allow_short": True,
-                                "max_short_exposure_pct": 0.08,
-                            }
-                        )
-
-                    component_breakdown = {
-                        "velocity_component": round(velocity_component, 3),
-                        "momentum_component": round(momentum_component, 3),
-                        "gap_high_component": round(gap_high_component, 3),
-                        "gap_ma_component": round(gap_ma_component, 3),
-                        "volume_component": round(volume_component, 3),
-                        "acceleration_component": round(acceleration_component, 3),
-                        "range_component": round(range_component, 3),
-                    }
-
-        observations = {
-            "ticker": ticker,
-            "current_short_shares": current_short,
-            "squeeze_features": {key: round(val, 6) for key, val in features.items()},
-            "component_breakdown": component_breakdown,
-            "squeeze_score": round(squeeze_score, 3),
-            "suggested_constraints": dict(auto_constraints),
-            "auto_signal_hint": auto_signal,
-            "auto_confidence_hint": auto_confidence,
-            "auto_reasoning": auto_reasoning,
-        }
+        df = prices_to_df(prices) if prices else None
+        observations, features = _prepare_observation(df=df, ticker=ticker, current_short=current_short)
+        progress.update_status(agent_id, ticker, f"Observation ready ({observations['data_status']})")
 
         decision = persona_from_observations(
             state=state,
@@ -259,33 +180,24 @@ def short_squeeze_guardian_agent(state: AgentState, agent_id: str = "short_squee
             allowed_signals=ALLOWED_SIGNALS,
             observations=observations,
             persona_instructions=PERSONA_INSTRUCTIONS,
-            default_signal="balanced",
+            default_signal="calm",
             default_confidence=55.0,
-            default_reasoning="Defaulted to balanced guidance after missing persona output.",
+            default_reasoning="Defaulted to calm after observation-only fallback.",
         )
 
-        metrics = {
-            **observations["squeeze_features"],
-            **component_breakdown,
-            "squeeze_score": round(squeeze_score, 3),
-            "current_short_shares": current_short,
-        }
+        metrics = dict(observations["squeeze_features"])
+        metrics["current_short_shares"] = current_short
 
         payload: dict[str, Any] = {
             "signal": decision.signal,
             "confidence": int(max(0, min(round(decision.confidence), 100))),
-            "score": round(squeeze_score, 3),
             "reasoning": decision.reasoning,
             "metrics": metrics,
             "constraints": decision.constraints or {},
             "meta": {"observations": observations},
         }
 
-        progress.update_status(
-            agent_id,
-            ticker,
-            f"{payload['signal'].upper()} @ {payload['confidence']}/100 | squeeze {payload['score']:.2f}",
-        )
+        progress.update_status(agent_id, ticker, f"{payload['signal'].upper()} @ {payload['confidence']}/100")
 
         guardian_view[ticker] = payload
 
@@ -301,3 +213,75 @@ def short_squeeze_guardian_agent(state: AgentState, agent_id: str = "short_squee
         "messages": state["messages"] + [message],
         "data": state["data"],
     }
+
+async def short_squeeze_guardian_agent_async(state: AgentState, agent_id: str = "short_squeeze_guardian_agent"):
+    """Async short squeeze guardian leveraging persona observations."""
+
+    data = state["data"]
+    tickers = data["tickers"]
+    start_date = data["start_date"]
+    end_date = data["end_date"]
+    portfolio = data.get("portfolio", {})
+    positions = portfolio.get("positions") or {}
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+
+    guardian_view: dict[str, dict[str, Any]] = {}
+
+    for ticker in tickers:
+        progress.update_status(agent_id, ticker, "Evaluating squeeze risk")
+        prices = await get_prices_async(
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            api_key=api_key,
+        )
+
+        current_short = int(_safe_float((positions.get(ticker, {}) or {}).get("short", 0), 0.0))
+        df = await prices_to_df_async(prices) if prices else None
+        observations, features = _prepare_observation(df=df, ticker=ticker, current_short=current_short)
+        progress.update_status(agent_id, ticker, f"Observation ready ({observations['data_status']})")
+
+        decision = await async_persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="calm",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to calm after observation-only fallback.",
+        )
+
+        metrics = dict(observations["squeeze_features"])
+        metrics["current_short_shares"] = current_short
+
+        confidence = int(max(0, min(round(decision.confidence), 100)))
+        payload: dict[str, Any] = {
+            "signal": decision.signal,
+            "confidence": confidence,
+            "reasoning": decision.reasoning,
+            "metrics": metrics,
+            "constraints": decision.constraints or {},
+            "meta": {"observations": observations},
+        }
+
+        progress.update_status(agent_id, ticker, f"{payload['signal'].upper()} @ {confidence}/100")
+
+        guardian_view[ticker] = payload
+
+    message = HumanMessage(content=json.dumps(guardian_view), name=agent_id)
+
+    if state["metadata"].get("show_reasoning"):
+        show_agent_reasoning(guardian_view, "Short Squeeze Guardian")
+
+    await update_analyst_signals_async(state, agent_id, guardian_view)
+    progress.update_status(agent_id, None, "Done")
+
+    return {
+        "messages": state["messages"] + [message],
+        "data": state["data"],
+    }
+

@@ -22,5 +22,3 @@ def price_df_factory():
         return pd.DataFrame({"close": closes})
 
     return _factory
-
-

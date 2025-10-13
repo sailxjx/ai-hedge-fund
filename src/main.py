@@ -1,16 +1,16 @@
-import argparse
+import asyncio
 import copy
 import io
 import json
 import re
 import sys
 from contextlib import redirect_stdout
-from datetime import datetime
+from datetime import datetime, timezone
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-from colorama import Fore, init, Style
-from dateutil.relativedelta import relativedelta
+from colorama import init
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
@@ -21,10 +21,10 @@ from src.agents.risk_override_amplifier import risk_override_amplifier_agent
 from src.backtesting.portfolio import Portfolio
 from src.cli.input import parse_cli_inputs
 from src.graph.state import AgentState
-from src.utils.analysts import ANALYST_ORDER, get_analyst_nodes
+from src.utils.analysts import get_analyst_nodes
 from src.utils.display import print_trading_output
 from src.utils.progress import progress
-from src.utils.visualize import save_graph_as_png
+from src.utils.runtime import async_personas_enabled
 
 # Load environment variables from .env file
 load_dotenv()
@@ -53,6 +53,14 @@ ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 def strip_ansi(text: str) -> str:
     """Remove ANSI color codes from a string."""
     return ANSI_ESCAPE_RE.sub("", text)
+
+
+def _resolve_agent_function(func, async_mode: bool) -> Any:
+    if not async_mode:
+        return func
+    module = import_module(func.__module__)
+    async_candidate = getattr(module, f"{func.__name__}_async", None)
+    return async_candidate or func
 
 
 def _build_metadata(
@@ -88,14 +96,99 @@ def _build_override_logging_metadata(
     else:
         tickers_slug = "_".join(tickers) if tickers else "portfolio"
         window_slug = f"{start_date}_to_{end_date}".replace("-", "")
-        timestamp_slug = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        timestamp_slug = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_label = f"cli_{tickers_slug}_{window_slug}_{timestamp_slug}"
         overrides["run_label"] = run_label
         overrides["risk_override_log_path"] = str(Path("log/risk_overrides") / f"{run_label}.jsonl")
     return overrides
 
 
-##### Run the Hedge Fund #####
+# Run the Hedge Fund
+def _prepare_agent_run(
+    *,
+    tickers: list[str],
+    start_date: str,
+    end_date: str,
+    portfolio: dict,
+    show_reasoning: bool,
+    selected_analysts: list[str] | None,
+    model_name: str,
+    model_provider: str,
+    metadata_overrides: dict[str, Any] | None,
+    async_mode: bool,
+):
+    overrides_for_metadata: dict[str, Any] | None = None
+    persistent_state: dict[str, Any] | None = None
+    if metadata_overrides:
+        overrides_for_metadata = {key: value for key, value in metadata_overrides.items() if key != "risk_manager_state"}
+        if "risk_manager_state" in metadata_overrides:
+            persistent_state = copy.deepcopy(metadata_overrides["risk_manager_state"])
+
+    workflow = create_workflow(selected_analysts if selected_analysts else None, async_mode=async_mode)
+    agent = workflow.compile()
+
+    data_payload: dict[str, Any] = {
+        "tickers": tickers,
+        "portfolio": portfolio,
+        "start_date": start_date,
+        "end_date": end_date,
+        "analyst_signals": {},
+    }
+    if persistent_state:
+        data_payload["risk_manager_state"] = persistent_state
+
+    invocation = {
+        "messages": [
+            HumanMessage(
+                content="Make trading decisions based on the provided data.",
+            )
+        ],
+        "data": data_payload,
+        "metadata": _build_metadata(
+            show_reasoning=show_reasoning,
+            model_name=model_name,
+            model_provider=model_provider,
+            overrides=overrides_for_metadata,
+        ),
+    }
+
+    return agent, invocation
+
+
+def _register_timing_handler():
+    timings: dict[str, dict[str, Any]] = {}
+
+    def handler(agent_name, ticker, status, analysis, timestamp):
+        try:
+            observed = datetime.fromisoformat(timestamp)
+        except ValueError:
+            observed = datetime.now(timezone.utc)
+        entry = timings.setdefault(agent_name, {"start": None, "end": None, "updates": 0})
+        if entry["start"] is None:
+            entry["start"] = observed
+        entry["end"] = observed
+        entry["updates"] += 1
+
+    progress.register_handler(handler)
+    return timings, handler
+
+
+def _finalize_timings(timings: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    report: dict[str, Any] = {}
+    for agent_name, meta in timings.items():
+        start = meta.get("start")
+        end = meta.get("end")
+        if start and end:
+            elapsed = (end - start).total_seconds()
+        else:
+            elapsed = None
+        report[agent_name] = {
+            "elapsed_seconds": elapsed,
+            "updates": meta.get("updates", 0),
+        }
+    return report
+
+
 def run_hedge_fund(
     tickers: list[str],
     start_date: str,
@@ -107,55 +200,96 @@ def run_hedge_fund(
     model_provider: str = "OpenAI",
     metadata_overrides: dict[str, Any] | None = None,
 ):
-    # Start progress tracking
-    progress.start()
-
-    try:
-        overrides_for_metadata: dict[str, Any] | None = None
-        persistent_state: dict[str, Any] | None = None
-        if metadata_overrides:
-            overrides_for_metadata = {key: value for key, value in metadata_overrides.items() if key != "risk_manager_state"}
-            if "risk_manager_state" in metadata_overrides:
-                persistent_state = copy.deepcopy(metadata_overrides["risk_manager_state"])
-
-        # Build workflow (default to all analysts when none provided)
-        workflow = create_workflow(selected_analysts if selected_analysts else None)
-        agent = workflow.compile()
-
-        data_payload: dict[str, Any] = {
-            "tickers": tickers,
-            "portfolio": portfolio,
-            "start_date": start_date,
-            "end_date": end_date,
-            "analyst_signals": {},
-        }
-        if persistent_state:
-            data_payload["risk_manager_state"] = persistent_state
-
-        final_state = agent.invoke(
-            {
-                "messages": [
-                    HumanMessage(
-                        content="Make trading decisions based on the provided data.",
-                    )
-                ],
-                "data": data_payload,
-                "metadata": _build_metadata(
+    async_mode = async_personas_enabled()
+    if async_mode:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                run_hedge_fund_async(
+                    tickers=tickers,
+                    start_date=start_date,
+                    end_date=end_date,
+                    portfolio=portfolio,
                     show_reasoning=show_reasoning,
+                    selected_analysts=selected_analysts,
                     model_name=model_name,
                     model_provider=model_provider,
-                    overrides=overrides_for_metadata,
-                ),
-            },
+                    metadata_overrides=metadata_overrides,
+                )
+            )
+        raise RuntimeError("Async personas are enabled. Await run_hedge_fund_async (or set ASYNC_PERSONAS=0 before invoking run_hedge_fund inside an active event loop).")
+
+    progress.start()
+    try:
+        agent, invocation = _prepare_agent_run(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            portfolio=portfolio,
+            show_reasoning=show_reasoning,
+            selected_analysts=selected_analysts,
+            model_name=model_name,
+            model_provider=model_provider,
+            metadata_overrides=metadata_overrides,
+            async_mode=False,
         )
+
+        timings, handler = _register_timing_handler()
+        try:
+            final_state = agent.invoke(invocation)
+        finally:
+            progress.unregister_handler(handler)
+        timing_report = _finalize_timings(timings)
 
         return {
             "decisions": parse_hedge_fund_response(final_state["messages"][-1].content),
             "analyst_signals": final_state["data"]["analyst_signals"],
             "risk_manager_state": copy.deepcopy(final_state["data"].get("risk_manager_state")),
+            "timings": timing_report,
         }
     finally:
-        # Stop progress tracking
+        progress.stop()
+
+
+async def run_hedge_fund_async(
+    tickers: list[str],
+    start_date: str,
+    end_date: str,
+    portfolio: dict,
+    show_reasoning: bool = False,
+    selected_analysts: list[str] | None = None,
+    model_name: str = "gpt-4.1",
+    model_provider: str = "OpenAI",
+    metadata_overrides: dict[str, Any] | None = None,
+):
+    progress.start()
+    try:
+        agent, invocation = _prepare_agent_run(
+            tickers=tickers,
+            start_date=start_date,
+            end_date=end_date,
+            portfolio=portfolio,
+            show_reasoning=show_reasoning,
+            selected_analysts=selected_analysts,
+            model_name=model_name,
+            model_provider=model_provider,
+            metadata_overrides=metadata_overrides,
+            async_mode=True,
+        )
+        timings, handler = _register_timing_handler()
+        try:
+            final_state = await agent.ainvoke(invocation)
+        finally:
+            progress.unregister_handler(handler)
+        timing_report = _finalize_timings(timings)
+        return {
+            "decisions": parse_hedge_fund_response(final_state["messages"][-1].content),
+            "analyst_signals": final_state["data"]["analyst_signals"],
+            "risk_manager_state": copy.deepcopy(final_state["data"].get("risk_manager_state")),
+            "timings": timing_report,
+        }
+    finally:
         progress.stop()
 
 
@@ -164,13 +298,14 @@ def start(state: AgentState):
     return state
 
 
-def create_workflow(selected_analysts=None):
+def create_workflow(selected_analysts=None, async_mode: bool | None = None):
     """Create the workflow with selected analysts."""
     workflow = StateGraph(AgentState)
     workflow.add_node("start_node", start)
 
     # Get analyst nodes from the configuration
-    analyst_nodes = get_analyst_nodes()
+    use_async = async_personas_enabled() if async_mode is None else async_mode
+    analyst_nodes = get_analyst_nodes(async_enabled=use_async)
 
     # Default to all analysts if none selected
     if selected_analysts is None:
@@ -182,9 +317,9 @@ def create_workflow(selected_analysts=None):
         workflow.add_edge("start_node", node_name)
 
     # Always add risk and portfolio management
-    workflow.add_node("risk_management_agent", risk_management_agent)
-    workflow.add_node("risk_override_amplifier", risk_override_amplifier_agent)
-    workflow.add_node("portfolio_manager", portfolio_management_agent)
+    workflow.add_node("risk_management_agent", _resolve_agent_function(risk_management_agent, use_async))
+    workflow.add_node("risk_override_amplifier", _resolve_agent_function(risk_override_amplifier_agent, use_async))
+    workflow.add_node("portfolio_manager", _resolve_agent_function(portfolio_management_agent, use_async))
 
     # Connect selected analysts to risk management
     for analyst_key in selected_analysts:

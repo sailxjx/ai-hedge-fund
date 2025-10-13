@@ -43,13 +43,6 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
-def _clip_component(value: float, scale: float, *, cap: float = 1.0) -> float:
-    if scale <= 0 or not np.isfinite(value):
-        return 0.0
-    normalised = value / scale
-    return float(np.clip(normalised, 0.0, cap))
-
-
 def _normalised_slope(series: pd.Series, window: int) -> float:
     if len(series) < window:
         return 0.0
@@ -152,55 +145,46 @@ def _compute_features(df: pd.DataFrame) -> dict[str, float]:
     }
 
 
-def _score_recovery(features: dict[str, float]) -> tuple[str, float]:
-    drift_component = _clip_component(max(0.0, features.get("ret_5", 0.0)), 0.05, cap=1.2)
-    slope_component = _clip_component(max(0.0, features.get("trend_slope_8", 0.0)), 0.007, cap=1.1)
-    position_component = float(
-        np.clip(features.get("range_position", 0.0) - 0.45, 0.0, 0.55) / 0.55
-    )
-    contraction_component = _clip_component(max(0.0, -features.get("vol_ratio", 0.0)), 0.6, cap=1.0)
-    rebound_component = _clip_component(max(0.0, features.get("rebound_from_low", 0.0)), 0.12, cap=1.0)
-    width_component = _clip_component(max(0.0, 0.1 - features.get("range_width_pct", 0.1)), 0.08, cap=1.0)
+def _prepare_observation(
+    *,
+    df: pd.DataFrame | None,
+    ticker: str,
+    existing_short: int,
+) -> tuple[dict[str, Any], dict[str, float]]:
+    notes: list[str] = []
+    features: dict[str, float] = {}
+    data_status = "missing_prices"
 
-    score = float(
-        np.clip(
-            0.24 * drift_component
-            + 0.20 * slope_component
-            + 0.18 * position_component
-            + 0.18 * contraction_component
-            + 0.12 * rebound_component
-            + 0.08 * width_component,
-            0.0,
-            1.25,
-        )
-    )
-
-    ret_5 = features.get("ret_5", 0.0)
-    trend_slope = features.get("trend_slope_8", 0.0)
-    range_position = features.get("range_position", 0.0)
-    range_width = features.get("range_width_pct", 1.0)
-    vol_ratio = features.get("vol_ratio", 0.0)
-
-    if ret_5 >= 0.045 or (range_position >= 0.8 and trend_slope >= 0.004 and range_width <= 0.07):
-        return "compression_break", score
-    if score >= 0.55 or (ret_5 >= 0.02 and trend_slope >= 0.0025 and vol_ratio <= 0.15):
-        return "drift_recovery", score
-    if score >= 0.38 or (range_position >= 0.65 and vol_ratio <= 0.2):
-        return "range_monitor", score
-    return "monitor", score
-
-
-def _confidence(stage: str, score: float) -> int:
-    if stage == "compression_break":
-        base, scale, ceiling = 70, 28, 98
-    elif stage == "drift_recovery":
-        base, scale, ceiling = 60, 24, 94
-    elif stage == "range_monitor":
-        base, scale, ceiling = 52, 20, 90
+    if df is None:
+        notes.append("No price history retrieved for range diagnostics.")
     else:
-        base, scale, ceiling = 44, 18, 80
-    conf = base + score * scale
-    return int(np.clip(conf, 35, ceiling))
+        if df.empty or len(df) < 30:
+            data_status = "insufficient_history"
+            notes.append("Need at least 30 observations to evaluate range recoveries.")
+        else:
+            features = _compute_features(df)
+            if not features:
+                data_status = "feature_extraction_failed"
+                notes.append("Unable to derive range metrics from the recent window.")
+            else:
+                data_status = "data_ready"
+                notes.append(
+                    "Range diagnostics: "
+                    f"range_position {features['range_position']:.2f}, "
+                    f"rebound_from_low {features['rebound_from_low']:.1%}, "
+                    f"vol_ratio {features['vol_ratio']:+.2f}, "
+                    f"ret_5 {features['ret_5']:.1%}."
+                )
+
+    observations = {
+        "ticker": ticker,
+        "existing_short_shares": existing_short,
+        "data_status": data_status,
+        "range_features": {key: float(val) for key, val in features.items()} if features else {},
+        "diagnostic_notes": notes,
+    }
+
+    return observations, features
 
 
 ##### Range Recovery Sentinel #####
@@ -228,114 +212,11 @@ def range_recovery_sentinel_agent(
             api_key=api_key,
         )
 
-        features: dict[str, float] = {}
-        score = 0.0
         current_position = positions.get(ticker, {}) or {}
         existing_short = _safe_int(current_position.get("short"))
-
-        auto_signal = "no_data"
-        auto_confidence = 35
-        auto_reasoning = "Missing price history prevents range recovery diagnostics."
-        auto_constraints: dict[str, Any] = {}
-
-        if not prices:
-            progress.update_status(agent_id, ticker, "Failed: Missing price data")
-        else:
-            df = prices_to_df(prices)
-            if df.empty:
-                auto_signal = "no_data"
-                auto_confidence = 35
-                auto_reasoning = "Empty price history prevents range recovery diagnostics."
-                progress.update_status(agent_id, ticker, "Failed: Empty price data")
-            else:
-                features = _compute_features(df)
-                if not features:
-                    auto_signal = "insufficient_history"
-                    auto_confidence = 38
-                    auto_reasoning = "Need at least 30 observations with variance to evaluate drift."
-                    progress.update_status(agent_id, ticker, "Failed: Insufficient history")
-                else:
-                    auto_signal, score = _score_recovery(features)
-                    auto_confidence = _confidence(auto_signal, score)
-                    reasoning_parts = [
-                        f"5d {features['ret_5']:.1%}",
-                        f"10d {features['ret_10']:.1%}",
-                        f"range pos {features['range_position']:.2f}",
-                        f"vol ratio {features['vol_ratio']:+.2f}",
-                    ]
-                    auto_reasoning = "; ".join(reasoning_parts)
-
-                    auto_constraints = {}
-                    if auto_signal == "compression_break":
-                        auto_constraints.update(
-                            {
-                                "preferred_direction": "long",
-                                "block_new_shorts": True,
-                                "allow_short": False,
-                                "max_short_exposure_pct": 0.0,
-                                "max_additional_short_shares": 0,
-                                "target_short_shares": 0,
-                            }
-                        )
-                        if existing_short > 0:
-                            auto_constraints["force_cover_qty"] = existing_short
-                            auto_constraints["force_cover_reason"] = (
-                                "Range recovery sentinel covering shorts after upside break."
-                            )
-                    elif auto_signal == "drift_recovery":
-                        trimmed_target = max(0, int(np.floor(existing_short * 0.35)))
-                        force_cover_qty = max(0, existing_short - trimmed_target)
-                        auto_constraints.update(
-                            {
-                                "preferred_direction": "neutral",
-                                "block_new_shorts": True,
-                                "allow_short": False,
-                                "max_short_exposure_pct": 0.03,
-                                "max_additional_short_shares": 0,
-                                "target_short_shares": trimmed_target,
-                            }
-                        )
-                        if force_cover_qty > 0:
-                            auto_constraints["force_cover_qty"] = force_cover_qty
-                            auto_constraints["force_cover_reason"] = (
-                                "Range recovery sentinel trimming shorts into upside drift."
-                            )
-                    elif auto_signal == "range_monitor":
-                        if existing_short > 0:
-                            softened_target = max(0, int(np.ceil(existing_short * 0.6)))
-                            auto_constraints.update(
-                                {
-                                    "preferred_direction": "neutral",
-                                    "block_new_shorts": True,
-                                    "allow_short": False,
-                                    "max_short_exposure_pct": 0.05,
-                                    "max_additional_short_shares": 0,
-                                    "target_short_shares": softened_target,
-                                }
-                            )
-                        else:
-                            auto_constraints.update(
-                                {
-                                    "preferred_direction": "neutral",
-                                    "block_new_shorts": True,
-                                    "allow_short": False,
-                                    "max_short_exposure_pct": 0.04,
-                                    "max_additional_short_shares": 0,
-                                }
-                            )
-                    else:
-                        auto_constraints = {}
-
-        observations = {
-            "ticker": ticker,
-            "existing_short_shares": existing_short,
-            "range_features": {key: round(val, 6) for key, val in features.items()},
-            "range_score": round(score, 3),
-            "suggested_constraints": dict(auto_constraints),
-            "auto_signal_hint": auto_signal,
-            "auto_confidence_hint": auto_confidence,
-            "auto_reasoning": auto_reasoning,
-        }
+        df = prices_to_df(prices) if prices else None
+        observations, features = _prepare_observation(df=df, ticker=ticker, existing_short=existing_short)
+        progress.update_status(agent_id, ticker, f"Observation ready ({observations['data_status']})")
 
         decision = persona_from_observations(
             state=state,
@@ -352,17 +233,12 @@ def range_recovery_sentinel_agent(
         )
 
         metrics = dict(observations["range_features"])
-        metrics.update(
-            {
-                "score": round(score, 3),
-                "existing_short_shares": existing_short,
-            }
-        )
+        metrics["existing_short_shares"] = existing_short
 
+        confidence = int(max(0, min(round(decision.confidence), 100)))
         payload: dict[str, Any] = {
             "signal": decision.signal,
-            "score": round(score, 3),
-            "confidence": int(max(0, min(round(decision.confidence), 100))),
+            "confidence": confidence,
             "reasoning": decision.reasoning,
             "metrics": metrics,
             "constraints": decision.constraints or {},
@@ -370,11 +246,7 @@ def range_recovery_sentinel_agent(
         }
 
         sentinel_signals[ticker] = payload
-        progress.update_status(
-            agent_id,
-            ticker,
-            f"{payload['signal'].upper()} @ {payload['confidence']}/100 | score {score:.2f}",
-        )
+        progress.update_status(agent_id, ticker, f"{payload['signal'].upper()} @ {confidence}/100")
 
     message = HumanMessage(content=json.dumps(sentinel_signals), name=agent_id)
 

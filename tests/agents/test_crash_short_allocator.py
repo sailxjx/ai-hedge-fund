@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Callable
+
+import pytest
 
 from src.agents.crash_short_allocator import crash_short_allocator_agent
 from src.agents.persona_utils import PersonaDecision
@@ -26,16 +29,29 @@ def _build_price_series(count: int = 150, base: float = 320.0, step: float = -0.
     return series
 
 
-def _persona_passthrough(**kwargs):
-    default = kwargs.get("default_decision", {})
-    constraints = default.get("constraints")
-    fallback_constraints = constraints if isinstance(constraints, dict) else {}
-    return PersonaDecision(
-        signal=str(default.get("signal", "monitor")),
-        confidence=float(default.get("confidence", 0)),
-        reasoning=str(default.get("reasoning", "")),
-        constraints=fallback_constraints,
-    )
+def _persona_stub_factory(
+    *,
+    signal: str,
+    confidence: float,
+    constraints: dict | Callable[[dict], dict] | None = None,
+):
+    captured: dict[str, dict] = {}
+
+    def _stub(*, observations=None, **_):
+        obs = observations or {}
+        captured["observations"] = obs
+        if callable(constraints):
+            resolved = constraints(obs)
+        else:
+            resolved = constraints or {}
+        return PersonaDecision(
+            signal=signal,
+            confidence=confidence,
+            reasoning=f"Stubbed {signal} decision",
+            constraints=resolved,
+        )
+
+    return captured, _stub
 
 
 def _build_rebound_series() -> list[Price]:
@@ -75,13 +91,26 @@ def _base_state() -> dict:
 
 def test_allocator_targets_shorts_when_crash_conviction_high(monkeypatch):
     prices = _build_price_series()
-    monkeypatch.setattr(
-        "src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices
-    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices)
     monkeypatch.setattr(
         "src.agents.crash_short_allocator.get_api_key_from_state",
         lambda *_: None,
     )
+
+    captured, persona_stub = _persona_stub_factory(
+        signal="crash_short",
+        confidence=92.0,
+        constraints=lambda obs: {
+            "preferred_direction": "short",
+            "allow_short": True,
+            "reference_price": obs["allocation_model"]["price_hint"],
+            "allocation_pct": obs["allocation_model"]["effective_allocation_pct"] or 0.25,
+            "max_short_exposure_pct": obs["allocation_model"]["effective_allocation_pct"] or 0.25,
+            "target_short_shares": obs["allocation_model"]["target_short_shares_estimate"] or 1,
+            "raw_target_short_shares": obs["allocation_model"]["raw_target_short_shares_estimate"],
+        },
+    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.persona_from_observations", persona_stub)
 
     state = _base_state()
     analyst_signals = state["data"]["analyst_signals"]
@@ -106,6 +135,7 @@ def test_allocator_targets_shorts_when_crash_conviction_high(monkeypatch):
 
     result = crash_short_allocator_agent(state)
     payload = result["data"]["analyst_signals"]["crash_short_allocator_agent"]["TSLA"]
+    observations = captured["observations"]
 
     assert payload["signal"] == "crash_short"
     constraints = payload["constraints"]
@@ -114,22 +144,32 @@ def test_allocator_targets_shorts_when_crash_conviction_high(monkeypatch):
     assert constraints["max_short_exposure_pct"] >= 0
     assert constraints["reference_price"] > 0
     assert constraints["raw_target_short_shares"] >= constraints["target_short_shares"]
-    assert (
-        payload["indicators"].get("raw_target_short_shares")
-        == constraints["raw_target_short_shares"]
-    )
-    assert payload["allocation_pct"] <= constraints["max_short_exposure_pct"] + 1e-4
+    assert payload["allocation_pct"] == pytest.approx(constraints["allocation_pct"])
+    assert payload["indicators"]["target_short_shares_estimate"] == observations["allocation_model"]["target_short_shares_estimate"]
+    assert "auto_signal_hint" not in observations
 
 
 def test_allocator_targets_with_short_history(monkeypatch):
     prices = _build_price_series(count=20)
-    monkeypatch.setattr(
-        "src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices
-    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices)
     monkeypatch.setattr(
         "src.agents.crash_short_allocator.get_api_key_from_state",
         lambda *_: None,
     )
+
+    captured, persona_stub = _persona_stub_factory(
+        signal="short_bias",
+        confidence=81.0,
+        constraints=lambda obs: {
+            "preferred_direction": "short",
+            "allow_short": True,
+            "allocation_pct": obs["allocation_model"]["effective_allocation_pct"] or 0.18,
+            "max_short_exposure_pct": obs["allocation_model"]["effective_allocation_pct"] or 0.18,
+            "target_short_shares": obs["allocation_model"]["target_short_shares_estimate"] or 1,
+            "reference_price": obs["allocation_model"]["price_hint"],
+        },
+    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.persona_from_observations", persona_stub)
 
     state = _base_state()
     analyst_signals = state["data"]["analyst_signals"]
@@ -139,35 +179,44 @@ def test_allocator_targets_with_short_history(monkeypatch):
             "indicators": {"probabilities": {"rally": 0.2, "crash": 0.66}},
         }
     }
-    analyst_signals["macro_volatility_sentinel_agent"] = {
-        "TSLA": {"signal": "crash_alert", "score": 0.85}
-    }
-    analyst_signals["downside_flow_sentinel_agent"] = {
-        "TSLA": {"signal": "crash_flow", "score": 0.8}
-    }
-    analyst_signals["trend_regime_agent"] = {
-        "TSLA": {"signal": "bearish", "confidence": 78}
-    }
+    analyst_signals["macro_volatility_sentinel_agent"] = {"TSLA": {"signal": "crash_alert", "score": 0.85}}
+    analyst_signals["downside_flow_sentinel_agent"] = {"TSLA": {"signal": "crash_flow", "score": 0.8}}
+    analyst_signals["trend_regime_agent"] = {"TSLA": {"signal": "bearish", "confidence": 78}}
 
     result = crash_short_allocator_agent(state)
     payload = result["data"]["analyst_signals"]["crash_short_allocator_agent"]["TSLA"]
 
-    assert payload["signal"] in {"crash_short", "short_bias"}
+    assert payload["signal"] == "short_bias"
     assert payload["allocation_pct"] > 0
     constraints = payload["constraints"]
     assert constraints.get("target_short_shares", 0) > 0
     assert constraints.get("reference_price", 0) > 0
+    observations = captured["observations"]
+    assert observations["allocation_model"]["raw_allocation_pct"] >= 0
+    assert "auto_signal_hint" not in observations
 
 
 def test_allocator_accelerates_when_crash_prob_rises(monkeypatch):
     prices = _build_price_series(count=140, base=120.0, step=-0.05)
-    monkeypatch.setattr(
-        "src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices
-    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices)
     monkeypatch.setattr(
         "src.agents.crash_short_allocator.get_api_key_from_state",
         lambda *_: None,
     )
+
+    captured, persona_stub = _persona_stub_factory(
+        signal="short_bias",
+        confidence=77.0,
+        constraints=lambda obs: {
+            "preferred_direction": "short",
+            "allow_short": True,
+            "allocation_pct": obs["allocation_model"]["effective_allocation_pct"] or 0.12,
+            "max_short_exposure_pct": obs["allocation_model"]["effective_allocation_pct"] or 0.12,
+            "target_short_shares": obs["allocation_model"]["target_short_shares_estimate"] or 1,
+            "reference_price": obs["allocation_model"]["price_hint"],
+        },
+    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.persona_from_observations", persona_stub)
 
     state = _base_state()
     analyst_signals = state["data"]["analyst_signals"]
@@ -177,15 +226,9 @@ def test_allocator_accelerates_when_crash_prob_rises(monkeypatch):
             "indicators": {"probabilities": {"rally": 0.46, "crash": 0.49}, "close": 120.0},
         }
     }
-    analyst_signals["macro_volatility_sentinel_agent"] = {
-        "TSLA": {"signal": "calm", "score": 0.2}
-    }
-    analyst_signals["downside_flow_sentinel_agent"] = {
-        "TSLA": {"signal": "stable", "score": 0.18}
-    }
-    analyst_signals["trend_regime_agent"] = {
-        "TSLA": {"signal": "bullish", "confidence": 63}
-    }
+    analyst_signals["macro_volatility_sentinel_agent"] = {"TSLA": {"signal": "calm", "score": 0.2}}
+    analyst_signals["downside_flow_sentinel_agent"] = {"TSLA": {"signal": "stable", "score": 0.18}}
+    analyst_signals["trend_regime_agent"] = {"TSLA": {"signal": "bullish", "confidence": 63}}
 
     result = crash_short_allocator_agent(state)
     payload = result["data"]["analyst_signals"]["crash_short_allocator_agent"]["TSLA"]
@@ -194,46 +237,62 @@ def test_allocator_accelerates_when_crash_prob_rises(monkeypatch):
     constraints = payload["constraints"]
     assert constraints.get("target_short_shares", 0) > 0
     assert constraints.get("max_short_exposure_pct", 0) > 0
+    observations = captured["observations"]
+    assert observations["allocation_model"]["effective_allocation_pct"] is not None
 
 
 def test_allocator_monitor_when_signals_muted(monkeypatch):
     prices = _build_price_series(base=310.0, step=0.1)
-    monkeypatch.setattr(
-        "src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices
-    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices)
     monkeypatch.setattr(
         "src.agents.crash_short_allocator.get_api_key_from_state",
         lambda *_: None,
     )
 
+    captured, persona_stub = _persona_stub_factory(
+        signal="monitor",
+        confidence=60.0,
+        constraints=lambda obs: {"reference_price": obs["allocation_model"].get("price_hint")},
+    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.persona_from_observations", persona_stub)
+
     state = _base_state()
     analyst_signals = state["data"]["analyst_signals"]
-    analyst_signals["regime_meta_agent"] = {
-        "TSLA": {"indicators": {"probabilities": {"rally": 0.6, "crash": 0.18}}, "signal": "rally"}
-    }
-    analyst_signals["macro_volatility_sentinel_agent"] = {
-        "TSLA": {"signal": "calm", "score": 0.12}
-    }
-    analyst_signals["downside_flow_sentinel_agent"] = {
-        "TSLA": {"signal": "stable", "score": 0.1}
-    }
+    analyst_signals["regime_meta_agent"] = {"TSLA": {"indicators": {"probabilities": {"rally": 0.6, "crash": 0.18}}, "signal": "rally"}}
+    analyst_signals["macro_volatility_sentinel_agent"] = {"TSLA": {"signal": "calm", "score": 0.12}}
+    analyst_signals["downside_flow_sentinel_agent"] = {"TSLA": {"signal": "stable", "score": 0.1}}
 
     result = crash_short_allocator_agent(state)
     payload = result["data"]["analyst_signals"]["crash_short_allocator_agent"]["TSLA"]
 
     assert payload["signal"] == "monitor"
     assert set(payload["constraints"].keys()) <= {"reference_price"}
+    observations = captured["observations"]
+    assert observations["release_analysis"]["should_release"] is False
+    assert "auto_signal_hint" not in observations
 
 
 def test_allocator_releases_existing_short_on_rebound(monkeypatch):
     prices = _build_rebound_series()
-    monkeypatch.setattr(
-        "src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices
-    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices)
     monkeypatch.setattr(
         "src.agents.crash_short_allocator.get_api_key_from_state",
         lambda *_: None,
     )
+
+    captured, persona_stub = _persona_stub_factory(
+        signal="cover_short",
+        confidence=85.0,
+        constraints=lambda obs: {
+            "preferred_direction": "neutral",
+            "target_short_shares": 0,
+            "max_additional_short_shares": 0,
+            "max_short_exposure_pct": 0.0,
+            "force_cover_qty": obs["existing_positions"]["short"],
+            "block_new_shorts": True,
+        },
+    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.persona_from_observations", persona_stub)
 
     state = _base_state()
     state["data"]["portfolio"]["positions"]["TSLA"] = {"long": 0, "short": 6}
@@ -244,12 +303,8 @@ def test_allocator_releases_existing_short_on_rebound(monkeypatch):
             "signal": "neutral",
         }
     }
-    analyst_signals["macro_volatility_sentinel_agent"] = {
-        "TSLA": {"signal": "calm", "score": 0.18}
-    }
-    analyst_signals["downside_flow_sentinel_agent"] = {
-        "TSLA": {"signal": "stable", "score": 0.2}
-    }
+    analyst_signals["macro_volatility_sentinel_agent"] = {"TSLA": {"signal": "calm", "score": 0.18}}
+    analyst_signals["downside_flow_sentinel_agent"] = {"TSLA": {"signal": "stable", "score": 0.2}}
 
     result = crash_short_allocator_agent(state)
     payload = result["data"]["analyst_signals"]["crash_short_allocator_agent"]["TSLA"]
@@ -260,17 +315,31 @@ def test_allocator_releases_existing_short_on_rebound(monkeypatch):
     assert constraints["force_cover_qty"] == 6
     assert constraints["max_additional_short_shares"] == 0
     assert constraints["block_new_shorts"] is True
+    observations = captured["observations"]
+    assert observations["release_analysis"]["should_release"] is True
 
 
 def test_allocator_respects_peer_short_cap(monkeypatch):
     prices = _build_price_series()
-    monkeypatch.setattr(
-        "src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices
-    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.get_prices", lambda *_, **__: prices)
     monkeypatch.setattr(
         "src.agents.crash_short_allocator.get_api_key_from_state",
         lambda *_: None,
     )
+
+    captured, persona_stub = _persona_stub_factory(
+        signal="crash_short",
+        confidence=90.0,
+        constraints=lambda obs: {
+            "preferred_direction": "short",
+            "allow_short": True,
+            "reference_price": obs["allocation_model"]["price_hint"],
+            "max_short_exposure_pct": min(0.05, (obs["allocation_model"]["effective_allocation_pct"] or 0.05)),
+            "allocation_pct": min(0.05, (obs["allocation_model"]["effective_allocation_pct"] or 0.05)),
+            "target_short_shares": obs["allocation_model"]["target_short_shares_estimate"] or 1,
+        },
+    )
+    monkeypatch.setattr("src.agents.crash_short_allocator.persona_from_observations", persona_stub)
 
     state = _base_state()
     analyst_signals = state["data"]["analyst_signals"]
@@ -302,7 +371,7 @@ def test_allocator_respects_peer_short_cap(monkeypatch):
     constraints = payload["constraints"]
     indicators = payload["indicators"]
 
-    assert payload["signal"] in {"crash_short", "short_bias"}
+    assert payload["signal"] == "crash_short"
     assert constraints["max_short_exposure_pct"] <= 0.05 + 1e-9
 
     price_hint = constraints["reference_price"]
@@ -316,3 +385,5 @@ def test_allocator_respects_peer_short_cap(monkeypatch):
     assert payload["allocation_pct"] <= constraints["max_short_exposure_pct"] + 1e-4
     limiter_label = payload["indicators"].get("allocation_limiter")
     assert limiter_label is not None
+    observations = captured["observations"]
+    assert observations["allocation_model"]["allocation_candidates"]

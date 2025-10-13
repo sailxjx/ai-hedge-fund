@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Dict, Mapping, Mapping as _MappingAny
+from typing import Dict
+from typing import Mapping
+from typing import Mapping as _MappingAny
 
 from .portfolio import Portfolio
 
@@ -48,7 +50,6 @@ def compute_exposures(portfolio: Portfolio, current_prices: Mapping[str, float])
         "Net Exposure": net_exposure,
         "Long/Short Ratio": long_short_ratio,
     }
-
 
 
 def compute_portfolio_summary(

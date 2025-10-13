@@ -7,22 +7,21 @@ from typing import Any, Mapping
 
 from langchain_core.messages import HumanMessage
 
-from src.agents.persona_utils import apply_persona
+from src.agents.persona_utils import apply_persona, async_apply_persona
 from src.graph.state import AgentState, show_agent_reasoning
+from src.utils.async_state import update_analyst_signals_async
 from src.utils.progress import progress
-
 
 PERSONA_NAME = "Atlas"
 PERSONA_ROLE = "a risk amplifier translating override directives into trading instructions"
-PERSONA_BACKSTORY = (
-    "Atlas coordinated PM desks and risk teams, now narrating overrides to ensure humans understand the intent before acting."
-)
+PERSONA_BACKSTORY = "Atlas coordinated PM desks and risk teams, now narrating overrides to ensure humans understand the intent before acting."
 PERSONA_INSTRUCTIONS = (
     "Respect the risk manager's directives but articulate whether to enforce, temper, or clarify them.",
     "Call out when conflicting flags (e.g., block new shorts vs prefer short) require nuance.",
     "Explain the guidance in first person, referencing the override fields that mattered.",
 )
 ALLOWED_SIGNALS = ["risk_force_cover", "risk_trim_short", "risk_build_long", "risk_guardrail", "risk_prefer_short", "risk_prefer_long", "risk_add_long", "risk_neutral"]
+
 
 def _optional_non_negative_int(value: Any) -> int | None:
     try:
@@ -63,76 +62,64 @@ def _format_reason(parts: list[str], default: str) -> str:
     return "; ".join(filtered)
 
 
-def _amplify_for_ticker(
+def _build_payload(
+    *,
+    ticker: str,
+    long_shares: int,
+    short_shares: int,
+    normalized_overrides: Mapping[str, Any],
+    overrides_summary: Mapping[str, Any],
+    auto_signal: str,
+    auto_confidence: int,
+    reasoning: str,
+    directives: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    directives_dict = dict(directives or {})
+    bounded_confidence = int(max(0, min(auto_confidence, 100)))
+    payload: dict[str, Any] = {
+        "signal": auto_signal,
+        "confidence": bounded_confidence,
+        "reasoning": reasoning,
+        "directives": directives_dict,
+        "overrides": overrides_summary,
+        "constraints": dict(directives_dict),
+        "auto_reasoning": reasoning,
+    }
+    persona_context = {
+        "ticker": ticker,
+        "position": {"long": long_shares, "short": short_shares},
+        "overrides": normalized_overrides,
+        "directives": directives_dict,
+        "model_recommendation": {
+            "signal": auto_signal,
+            "confidence": bounded_confidence,
+            "reasoning": reasoning,
+            "constraints": dict(directives_dict),
+        },
+    }
+    return payload, persona_context
+
+
+def _prepare_amplification_payload(
     *,
     ticker: str,
     overrides: Mapping[str, Any] | None,
     position: Mapping[str, Any],
-    state: AgentState,
-    agent_id: str,
-) -> dict[str, Any]:
-    """Amplify risk overrides into persona-reviewed directives."""
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Derive the auto amplification payload and persona context for a ticker."""
 
     long_shares = _optional_non_negative_int(position.get("long")) or 0
     short_shares = _optional_non_negative_int(position.get("short")) or 0
 
     normalized_overrides: Mapping[str, Any] = overrides or {}
     overrides_summary = _summarise_overrides(normalized_overrides)
-
-    def finalize(
-        auto_signal: str,
-        auto_confidence: int,
-        reasoning: str,
-        directives: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        directives_dict = dict(directives or {})
-        bounded_confidence = int(max(0, min(auto_confidence, 100)))
-        payload: dict[str, Any] = {
-            "signal": auto_signal,
-            "confidence": bounded_confidence,
-            "reasoning": reasoning,
-            "directives": directives_dict,
-            "overrides": overrides_summary,
-            "constraints": dict(directives_dict),
-            "auto_reasoning": reasoning,
-        }
-
-        persona_context = {
-            "ticker": ticker,
-            "position": {"long": long_shares, "short": short_shares},
-            "overrides": normalized_overrides,
-            "directives": directives_dict,
-            "model_recommendation": {
-                "signal": auto_signal,
-                "confidence": bounded_confidence,
-                "reasoning": reasoning,
-                "constraints": dict(directives_dict),
-            },
-        }
-
-        decision = apply_persona(
-            state=state,
-            agent_id=agent_id,
-            persona_name=PERSONA_NAME,
-            persona_role=PERSONA_ROLE,
-            persona_backstory=PERSONA_BACKSTORY,
-            allowed_signals=ALLOWED_SIGNALS,
-            persona_instructions=PERSONA_INSTRUCTIONS,
-            payload=payload,
-            context=persona_context,
-        )
-        payload.setdefault("meta", {})
-        payload["meta"].update(
-            {
-                "auto_signal": auto_signal,
-                "auto_confidence": bounded_confidence,
-                "persona_overrode_auto": decision.signal != auto_signal,
-            }
-        )
-        return payload
-
     if not normalized_overrides:
-        return finalize(
+        return _build_payload(
+            ticker=ticker,
+            long_shares=long_shares,
+            short_shares=short_shares,
+            normalized_overrides=normalized_overrides,
+            overrides_summary=overrides_summary,
             auto_signal="risk_neutral",
             auto_confidence=55,
             reasoning="Risk manager supplied no overrides for amplification.",
@@ -165,7 +152,12 @@ def _amplify_for_ticker(
             reason_parts.append(f"Target short ≤ {target_short} shares.")
         if force_cover_reason:
             reason_parts.append(str(force_cover_reason))
-        return finalize(
+        return _build_payload(
+            ticker=ticker,
+            long_shares=long_shares,
+            short_shares=short_shares,
+            normalized_overrides=normalized_overrides,
+            overrides_summary=overrides_summary,
             auto_signal="risk_force_cover",
             auto_confidence=100,
             reasoning=_format_reason(
@@ -184,10 +176,13 @@ def _amplify_for_ticker(
                 "target_short_shares": target_short,
             }
         )
-        reason_parts.append(
-            f"Trim short exposure from {short_shares} to {target_short} shares per risk cap."
-        )
-        return finalize(
+        reason_parts.append(f"Trim short exposure from {short_shares} to {target_short} shares per risk cap.")
+        return _build_payload(
+            ticker=ticker,
+            long_shares=long_shares,
+            short_shares=short_shares,
+            normalized_overrides=normalized_overrides,
+            overrides_summary=overrides_summary,
             auto_signal="risk_trim_short",
             auto_confidence=97,
             reasoning=_format_reason(
@@ -197,76 +192,88 @@ def _amplify_for_ticker(
             directives=directives,
         )
 
-    if preferred_direction == "long" and target_long is not None and long_shares < target_long:
-        to_buy = target_long - long_shares
-        directives.update(
-            {
-                "action": "buy",
-                "target_quantity": to_buy,
-                "target_long_shares": target_long,
-            }
-        )
-        reason_parts.append(
-            f"Increase long holdings by {to_buy} shares to reach target {target_long}."
-        )
-        return finalize(
-            auto_signal="risk_build_long",
-            auto_confidence=94,
-            reasoning=_format_reason(
-                reason_parts,
-                "Build long exposure to satisfy risk manager target.",
-            ),
-            directives=directives,
-        )
-
-    if block_new_shorts:
-        directives["block_new_shorts"] = True
-        reason_parts.append("Block new short exposure per risk override.")
-
-    if preferred_direction == "short":
-        no_short_capacity = block_new_shorts or (max_short_add is not None and max_short_add <= 0)
-        if short_shares <= 0 and no_short_capacity:
-            reason_parts.append(
-                "Short bias flagged but new shorts are blocked; maintain guardrail stance."
+        if preferred_direction == "long" and target_long is not None and long_shares < target_long:
+            to_buy = target_long - long_shares
+            directives.update(
+                {
+                    "action": "buy",
+                    "target_quantity": to_buy,
+                    "target_long_shares": target_long,
+                }
             )
-            return finalize(
-                auto_signal="risk_guardrail",
-                auto_confidence=84,
+            reason_parts.append(f"Increase long holdings by {to_buy} shares to reach target {target_long}.")
+            return _build_payload(
+                ticker=ticker,
+                long_shares=long_shares,
+                short_shares=short_shares,
+                normalized_overrides=normalized_overrides,
+                overrides_summary=overrides_summary,
+                auto_signal="risk_build_long",
+                auto_confidence=94,
                 reasoning=_format_reason(
                     reason_parts,
-                    "Short bias noted but new shorts prohibited; maintain guardrail.",
+                    "Build long exposure to satisfy risk manager target.",
                 ),
                 directives=directives,
             )
 
-        reason_parts.append(
-            "Risk manager prefers short bias; align positioning with override."
-        )
-        directives.setdefault("preferred_direction", "short")
-        return finalize(
-            auto_signal="risk_prefer_short",
-            auto_confidence=95,
-            reasoning=_format_reason(
-                reason_parts,
-                "Adopt the risk manager short directive.",
-            ),
-            directives=directives,
-        )
+        if block_new_shorts:
+            directives["block_new_shorts"] = True
+            reason_parts.append("Block new short exposure per risk override.")
 
-    if preferred_direction == "long":
-        reason_parts.append(
-            "Risk manager prefers a long tilt; honour direction even if analysts diverge."
-        )
-        directives.setdefault("preferred_direction", "long")
-        return finalize(
-            auto_signal="risk_prefer_long",
-            auto_confidence=92,
-            reasoning=_format_reason(
-                reason_parts,
-                "Adopt the risk manager long directive.",
-            ),
-            directives=directives,
-        )
+        if preferred_direction == "short":
+            no_short_capacity = block_new_shorts or (max_short_add is not None and max_short_add <= 0)
+            if short_shares <= 0 and no_short_capacity:
+                reason_parts.append("Short bias flagged but new shorts are blocked; maintain guardrail stance.")
+                return _build_payload(
+                    ticker=ticker,
+                    long_shares=long_shares,
+                    short_shares=short_shares,
+                    normalized_overrides=normalized_overrides,
+                    overrides_summary=overrides_summary,
+                    auto_signal="risk_guardrail",
+                    auto_confidence=84,
+                    reasoning=_format_reason(
+                        reason_parts,
+                        "Short bias noted but new shorts prohibited; maintain guardrail.",
+                    ),
+                    directives=directives,
+                )
+
+            reason_parts.append("Risk manager prefers short bias; align positioning with override.")
+            directives.setdefault("preferred_direction", "short")
+            return _build_payload(
+                ticker=ticker,
+                long_shares=long_shares,
+                short_shares=short_shares,
+                normalized_overrides=normalized_overrides,
+                overrides_summary=overrides_summary,
+                auto_signal="risk_prefer_short",
+                auto_confidence=95,
+                reasoning=_format_reason(
+                    reason_parts,
+                    "Adopt the risk manager short directive.",
+                ),
+                directives=directives,
+            )
+
+        if preferred_direction == "long":
+            reason_parts.append("Risk manager prefers a long tilt; honour direction even if analysts diverge.")
+            directives.setdefault("preferred_direction", "long")
+            return _build_payload(
+                ticker=ticker,
+                long_shares=long_shares,
+                short_shares=short_shares,
+                normalized_overrides=normalized_overrides,
+                overrides_summary=overrides_summary,
+                auto_signal="risk_prefer_long",
+                auto_confidence=92,
+                reasoning=_format_reason(
+                    reason_parts,
+                    "Adopt the risk manager long directive.",
+                ),
+                directives=directives,
+            )
 
     if target_long is not None and long_shares < target_long:
         to_buy = target_long - long_shares
@@ -278,7 +285,12 @@ def _amplify_for_ticker(
             }
         )
         reason_parts.append(f"Add {to_buy} shares to reach long target {target_long}.")
-        return finalize(
+        return _build_payload(
+            ticker=ticker,
+            long_shares=long_shares,
+            short_shares=short_shares,
+            normalized_overrides=normalized_overrides,
+            overrides_summary=overrides_summary,
             auto_signal="risk_add_long",
             auto_confidence=88,
             reasoning=_format_reason(
@@ -293,7 +305,12 @@ def _amplify_for_ticker(
     if target_long is not None:
         reason_parts.append(f"Maintain at least {target_long} long shares.")
 
-    return finalize(
+    return _build_payload(
+        ticker=ticker,
+        long_shares=long_shares,
+        short_shares=short_shares,
+        normalized_overrides=normalized_overrides,
+        overrides_summary=overrides_summary,
         auto_signal="risk_guardrail",
         auto_confidence=82,
         reasoning=_format_reason(
@@ -302,6 +319,64 @@ def _amplify_for_ticker(
         ),
         directives=directives,
     )
+
+
+def _apply_persona_sync(
+    *,
+    payload: dict[str, Any],
+    persona_context: dict[str, Any],
+    state: AgentState,
+    agent_id: str,
+) -> dict[str, Any]:
+    decision = apply_persona(
+        state=state,
+        agent_id=agent_id,
+        persona_name=PERSONA_NAME,
+        persona_role=PERSONA_ROLE,
+        persona_backstory=PERSONA_BACKSTORY,
+        allowed_signals=ALLOWED_SIGNALS,
+        persona_instructions=PERSONA_INSTRUCTIONS,
+        payload=payload,
+        context=persona_context,
+    )
+    payload.setdefault("meta", {})
+    payload["meta"].update(
+        {
+            "auto_signal": persona_context["model_recommendation"]["signal"],
+            "auto_confidence": persona_context["model_recommendation"]["confidence"],
+            "persona_overrode_auto": decision.signal != persona_context["model_recommendation"]["signal"],
+        }
+    )
+    return payload
+
+
+async def _apply_persona_async(
+    *,
+    payload: dict[str, Any],
+    persona_context: dict[str, Any],
+    state: AgentState,
+    agent_id: str,
+) -> dict[str, Any]:
+    decision = await async_apply_persona(
+        state=state,
+        agent_id=agent_id,
+        persona_name=PERSONA_NAME,
+        persona_role=PERSONA_ROLE,
+        persona_backstory=PERSONA_BACKSTORY,
+        allowed_signals=ALLOWED_SIGNALS,
+        persona_instructions=PERSONA_INSTRUCTIONS,
+        payload=payload,
+        context=persona_context,
+    )
+    payload.setdefault("meta", {})
+    payload["meta"].update(
+        {
+            "auto_signal": persona_context["model_recommendation"]["signal"],
+            "auto_confidence": persona_context["model_recommendation"]["confidence"],
+            "persona_overrode_auto": decision.signal != persona_context["model_recommendation"]["signal"],
+        }
+    )
+    return payload
 
 
 ##### Risk Override Amplifier Agent #####
@@ -322,11 +397,14 @@ def risk_override_amplifier_agent(state: AgentState, agent_id: str = "risk_overr
         snapshot = risk_payload.get(ticker) or {}
         overrides = snapshot.get("overrides") if isinstance(snapshot, Mapping) else None
         position = positions.get(ticker, {})
-
-        amplified[ticker] = _amplify_for_ticker(
+        payload, persona_context = _prepare_amplification_payload(
             ticker=ticker,
             overrides=overrides if isinstance(overrides, Mapping) else None,
             position=position if isinstance(position, Mapping) else {},
+        )
+        amplified[ticker] = _apply_persona_sync(
+            payload=payload,
+            persona_context=persona_context,
             state=state,
             agent_id=agent_id,
         )
@@ -344,4 +422,51 @@ def risk_override_amplifier_agent(state: AgentState, agent_id: str = "risk_overr
     return {
         "messages": state["messages"] + [message],
         "data": data,
+    }
+
+
+async def risk_override_amplifier_agent_async(state: AgentState, agent_id: str = "risk_override_amplifier"):
+    """Async implementation that amplifies overrides without delegating to a background thread."""
+
+    data = state.get("data", {})
+    tickers = data.get("tickers", [])
+    portfolio = data.get("portfolio", {})
+    positions = portfolio.get("positions") or {}
+    analyst_signals = data.get("analyst_signals", {})
+    risk_payload = analyst_signals.get("risk_management_agent", {}) or {}
+
+    amplified: dict[str, dict[str, Any]] = {}
+
+    for ticker in tickers:
+        progress.update_status(agent_id, ticker, "Amplifying overrides")
+        snapshot = risk_payload.get(ticker) or {}
+        overrides = snapshot.get("overrides") if isinstance(snapshot, Mapping) else None
+        position = positions.get(ticker, {})
+
+        payload, persona_context = _prepare_amplification_payload(
+            ticker=ticker,
+            overrides=overrides if isinstance(overrides, Mapping) else None,
+            position=position if isinstance(position, Mapping) else {},
+        )
+        amplified[ticker] = await _apply_persona_async(
+            payload=payload,
+            persona_context=persona_context,
+            state=state,
+            agent_id=agent_id,
+        )
+
+    await update_analyst_signals_async(state, agent_id, amplified)
+
+    message = HumanMessage(content=json.dumps(amplified), name=agent_id)
+
+    if state.get("metadata", {}).get("show_reasoning"):
+        show_agent_reasoning(amplified, "Risk Override Amplifier")
+
+    progress.update_status(agent_id, None, "Done")
+
+    messages = list(state.get("messages", [])) + [message]
+
+    return {
+        "messages": messages,
+        "data": state["data"],
     }

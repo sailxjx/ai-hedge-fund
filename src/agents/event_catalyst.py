@@ -12,11 +12,11 @@ from pydantic import BaseModel, Field
 from typing_extensions import Literal
 
 from src.graph.state import AgentState, show_agent_reasoning
-from src.tools.api import get_company_news
+from src.tools.api import get_company_news, get_company_news_async
 from src.utils.api_key import get_api_key_from_state
-from src.utils.llm import call_llm
+from src.utils.async_state import update_analyst_signals_async
+from src.utils.llm import async_call_llm, call_llm
 from src.utils.progress import progress
-
 
 MAX_NEWS_ITEMS = 25
 
@@ -217,16 +217,8 @@ def _classify_timing(
     if not article_dt or not reference_dt:
         return "past"
 
-    article_dt_local = (
-        article_dt.astimezone(timezone.utc).replace(tzinfo=None)
-        if article_dt.tzinfo is not None
-        else article_dt
-    )
-    reference_dt_local = (
-        reference_dt.astimezone(timezone.utc).replace(tzinfo=None)
-        if reference_dt.tzinfo is not None
-        else reference_dt
-    )
+    article_dt_local = article_dt.astimezone(timezone.utc).replace(tzinfo=None) if article_dt.tzinfo is not None else article_dt
+    reference_dt_local = reference_dt.astimezone(timezone.utc).replace(tzinfo=None) if reference_dt.tzinfo is not None else reference_dt
     delta = (reference_dt_local - article_dt_local).days
     if delta <= RECENT_WINDOW_DAYS:
         return "recent"
@@ -285,10 +277,7 @@ def _build_article_features(
         "total_articles": len(features),
         "tone_counts": dict(tone_counter),
         "categories": list(category_summary.keys()),
-        "upcoming_events": sum(
-            cat_summary["timing_counts"].get("upcoming", 0)
-            for cat_summary in category_summary.values()
-        ),
+        "upcoming_events": sum(cat_summary["timing_counts"].get("upcoming", 0) for cat_summary in category_summary.values()),
     }
 
     for cat_summary in category_summary.values():
@@ -419,10 +408,7 @@ def _construct_prompt(
         [
             (
                 "system",
-                "You are an event-driven catalyst analyst for an equity long/short fund. "
-                "Use the provided event flow to determine near-term directional bias. "
-                "Highlight catalysts that can move the stock over the next 1-3 weeks, "
-                "incorporating risk or regime context when available. Always return JSON without extra prose.",
+                "You are an event-driven catalyst analyst for an equity long/short fund. " "Use the provided event flow to determine near-term directional bias. " "Highlight catalysts that can move the stock over the next 1-3 weeks, " "incorporating risk or regime context when available. Always return JSON without extra prose.",
             ),
             (
                 "human",
@@ -485,11 +471,7 @@ def _gather_context(analyst_signals: dict[str, Any], ticker: str) -> dict[str, A
         ticker_payload = payload.get(ticker)
         if not isinstance(ticker_payload, dict):
             continue
-        snapshot = {
-            key: ticker_payload.get(key)
-            for key in ("signal", "confidence", "constraints")
-            if key in ticker_payload
-        }
+        snapshot = {key: ticker_payload.get(key) for key in ("signal", "confidence", "constraints") if key in ticker_payload}
         if snapshot:
             context[agent_name] = snapshot
     return context
@@ -631,6 +613,97 @@ def event_catalyst_agent(state: AgentState, agent_id: str = "event_catalyst_agen
     progress.update_status(agent_id, None, "Done")
 
     return {"messages": [message], "data": data}
+
+
+async def event_catalyst_agent_async(state: AgentState, agent_id: str = "event_catalyst_agent"):
+    """Async event catalyst persona supporting parallel execution."""
+
+    data = state.get("data", {})
+    tickers: list[str] = data.get("tickers", [])
+    end_date: str | None = data.get("end_date")
+    reference_dt = _parse_datetime(end_date)
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+    analyst_signals = data.setdefault("analyst_signals", {})
+
+    results: dict[str, Any] = {}
+
+    for ticker in tickers:
+        progress.update_status(agent_id, ticker, "Fetching company news")
+        news_items = await get_company_news_async(
+            ticker=ticker,
+            end_date=end_date,
+            limit=MAX_NEWS_ITEMS * 2,
+            api_key=api_key,
+        )
+
+        sliced_news = list(news_items)[:MAX_NEWS_ITEMS]
+        features, category_summary, overview = _build_article_features(sliced_news, reference_dt)
+
+        context = _gather_context(analyst_signals, ticker)
+
+        if features:
+            progress.update_status(agent_id, ticker, "Evaluating catalysts")
+            prompt = _construct_prompt(ticker, end_date, features, category_summary, overview, context)
+        else:
+            progress.update_status(agent_id, ticker, "No fresh news - using fallback")
+            prompt = None
+
+        def _default_factory() -> EventCatalystSignal:
+            return _fallback_signal(ticker, features, overview)
+
+        if prompt is not None and features:
+            llm_result = await async_call_llm(
+                prompt=prompt,
+                pydantic_model=EventCatalystSignal,
+                agent_name=agent_id,
+                state=state,
+                default_factory=_default_factory,
+            )
+        else:
+            llm_result = _default_factory()
+
+        payload = llm_result.model_dump()
+        payload["confidence"] = float(max(0.0, min(100.0, payload.get("confidence", 0.0))))
+
+        catalysts = []
+        for catalyst in payload.get("catalysts", []) or []:
+            conv = float(catalyst.get("conviction", 0.0))
+            catalyst["conviction"] = max(0.0, min(1.0, conv))
+            timing = catalyst.get("timing")
+            if timing not in {"upcoming", "recent", "past"}:
+                catalyst["timing"] = "past"
+            direction = catalyst.get("direction")
+            if direction not in {"positive", "negative", "uncertain"}:
+                catalyst["direction"] = "uncertain"
+            catalysts.append(catalyst)
+        payload["catalysts"] = catalysts
+
+        news_stats = _summarise_news_signals(features)
+        harmonised = _harmonise_constraints(
+            signal=payload.get("signal"),
+            constraints=payload.get("constraints"),
+            news_stats=news_stats,
+        )
+
+        if harmonised is None and overview.get("upcoming_events", 0) > 0:
+            harmonised = {"reduce_position_change": True}
+
+        payload["constraints"] = harmonised
+
+        results[ticker] = payload
+
+        summary = f"{payload['signal'].upper()} @ {payload['confidence']:.0f}%"
+        progress.update_status(agent_id, ticker, summary, analysis=payload.get("reasoning", ""))
+
+    message = HumanMessage(content=json.dumps(results, ensure_ascii=False), name=agent_id)
+    if state.get("metadata", {}).get("show_reasoning"):
+        show_agent_reasoning(results, "Event Catalyst Agent")
+
+    await update_analyst_signals_async(state, agent_id, results)
+
+    progress.update_status(agent_id, None, "Done")
+
+    return {"messages": state.get("messages", []) + [message], "data": state["data"]}
 
 
 __all__ = [

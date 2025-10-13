@@ -29,8 +29,8 @@ class PerformanceMetricsCalculator:
         values: Sequence[PortfolioValuePoint],
         benchmark_values: Sequence[dict] | None = None,
     ) -> PerformanceMetrics:
-        import pandas as pd
         import numpy as np
+        import pandas as pd
 
         if not values:
             return {
@@ -106,18 +106,13 @@ class PerformanceMetricsCalculator:
                 bench_df = bench_df.reindex(df.index).ffill()
                 if not bench_df.empty:
                     bench_returns = bench_df["Benchmark Value"].pct_change()
-                    combined = pd.concat(
-                        [df["Daily Return"], bench_returns], axis=1, join="inner"
-                    ).dropna()
+                    combined = pd.concat([df["Daily Return"], bench_returns], axis=1, join="inner").dropna()
                     if not combined.empty:
                         combined.columns = ["portfolio", "benchmark"]
                         active = combined["portfolio"] - combined["benchmark"]
                         tracking_error = active.std()
                         if tracking_error > 1e-12:
-                            information_ratio = float(
-                                np.sqrt(self.annual_trading_days)
-                                * (active.mean() / tracking_error)
-                            )
+                            information_ratio = float(np.sqrt(self.annual_trading_days) * (active.mean() / tracking_error))
 
         return {
             "sharpe_ratio": sharpe,
