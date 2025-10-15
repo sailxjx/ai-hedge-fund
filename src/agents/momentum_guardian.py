@@ -36,13 +36,45 @@ def _calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return rsi.fillna(50.0)
 
 
+def _recent_ohlc_records(prices: pd.DataFrame, limit: int = 12) -> list[dict[str, Any]]:
+    recent = prices.tail(limit)[["open", "high", "low", "close", "volume"]]
+    records: list[dict[str, Any]] = []
+    for index, row in recent.iterrows():
+        ts = index.tz_localize(None) if isinstance(index, pd.Timestamp) and index.tz is not None else index
+        date_str = ts.date().isoformat() if hasattr(ts, "date") else str(ts)
+        records.append(
+            {
+                "date": date_str,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"] or 0.0),
+            }
+        )
+    return records
+
+
+def _recent_return_records(prices: pd.DataFrame, limit: int = 12) -> list[dict[str, Any]]:
+    returns = prices["close"].pct_change().tail(limit).dropna()
+    records: list[dict[str, Any]] = []
+    for index, value in returns.items():
+        ts = index.tz_localize(None) if isinstance(index, pd.Timestamp) and index.tz is not None else index
+        date_str = ts.date().isoformat() if hasattr(ts, "date") else str(ts)
+        records.append({"date": date_str, "daily_return": float(value)})
+    return records
+
+
 PERSONA_NAME = "Orion"
 PERSONA_ROLE = "a momentum guardian who protects the book from fighting dominant trends"
 PERSONA_BACKSTORY = "Orion spent a decade trading trend-following strategies and now advises when our short book must respect momentum."
 PERSONA_INSTRUCTIONS = (
     "Use the EMA alignment, price distance from trend anchors, momentum slopes, and RSI to judge whether shorts should be capped.",
+    "Cite the raw OHLC tape and daily return stream to justify the call—highlight inflection days and volume surges instead of quoting hard-coded thresholds.",
     "Compare each name against the batch momentum table to understand which trends dominate or lag.",
     "Incorporate the shared portfolio snapshot so your judgement links to actual position risk and avoids deterministic caps.",
+    "Call out elevated turnover or recent flips and recommend easing rotation instead of reversing the book day-after-day.",
+    "Respect regime/macro context: when risk and regime signals skew bullish, prioritise trimming shorts over adding new ones unless momentum evidence is overwhelming.",
 )
 ALLOWED_SIGNALS = ["bullish_momentum", "neutral", "bearish_momentum"]
 MIN_OBSERVATIONS = 30
@@ -70,8 +102,12 @@ def _format_percent(value: float | None, decimals: int = 2) -> str:
     return f"{value * 100:.{decimals}f}%"
 
 
-def _compute_momentum_snapshot(close: pd.Series) -> dict[str, Any] | None:
-    if close is None or close.empty:
+def _compute_momentum_snapshot(prices: pd.DataFrame) -> dict[str, Any] | None:
+    if prices is None or prices.empty:
+        return None
+
+    close = prices["close"].dropna()
+    if close.empty:
         return None
 
     current_price = _safe_float(close.iloc[-1])
@@ -135,11 +171,23 @@ def _compute_momentum_snapshot(close: pd.Series) -> dict[str, Any] | None:
     elif rsi_val < 30:
         notes.append("RSI < 30 indicates stretched bearish momentum.")
 
+    weekly_returns = close.pct_change(periods=5).dropna()
+    weekly_return_value = float(weekly_returns.iloc[-1]) if not weekly_returns.empty else None
+    weekly_vol = close.pct_change().rolling(5).std(ddof=0).dropna()
+    weekly_vol_value = float(weekly_vol.iloc[-1]) if not weekly_vol.empty else None
+
     return {
         "metrics": metrics,
         "trend_flags": trend_flags,
         "notes": notes,
         "lookback_observations": len(close),
+        "window_snapshot": {
+            "lookback_days": 5,
+            "compound_return": weekly_return_value,
+            "realised_volatility": weekly_vol_value,
+        },
+        "recent_ohlc": _recent_ohlc_records(prices),
+        "recent_daily_returns": _recent_return_records(prices),
     }
 
 
@@ -307,8 +355,7 @@ async def _collect_momentum_inputs(
             momentum_view[ticker] = _neutral_payload(f"Insufficient observations ({len(prices_df)}) for momentum guard.")
             continue
 
-        close = prices_df["close"].dropna()
-        snapshot = _compute_momentum_snapshot(close)
+        snapshot = _compute_momentum_snapshot(prices_df)
         if snapshot is None:
             momentum_view[ticker] = _neutral_payload("Unable to derive momentum metrics from price history.")
             continue
@@ -355,6 +402,9 @@ def _finalize_momentum_sync(
             "portfolio_snapshot": portfolio_snapshot,
             "peer_summary": peer_summary,
             "peer_rankings": _peer_rankings_for_ticker(ticker, peer_summary),
+            "window_snapshot": snapshot.get("window_snapshot"),
+            "recent_ohlc": snapshot.get("recent_ohlc"),
+            "recent_daily_returns": snapshot.get("recent_daily_returns"),
         }
 
         decision = persona_from_observations(
@@ -371,13 +421,20 @@ def _finalize_momentum_sync(
             default_reasoning="Defaulted to neutral after missing persona response.",
         )
 
+        trend_flags = snapshot["trend_flags"]
+        signal = decision.signal if decision.signal in ALLOWED_SIGNALS else "neutral"
+        raw_confidence = decision.confidence if isinstance(decision.confidence, (int, float)) else 0.0
+        confidence = int(np.clip(raw_confidence, 0, 100))
+        reasoning = decision.reasoning or "Defaulted to neutral after missing persona response."
+        constraints = dict(decision.constraints or {})
+
         payload = {
-            "signal": decision.signal,
-            "confidence": int(np.clip(decision.confidence, 0, 100)),
-            "reasoning": decision.reasoning,
-            "constraints": decision.constraints or {},
+            "signal": signal,
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "constraints": constraints,
             "metrics": snapshot["metrics"],
-            "trend_flags": snapshot["trend_flags"],
+            "trend_flags": trend_flags,
             "meta": {"observations": observations},
         }
         momentum_view[ticker] = payload
@@ -434,6 +491,9 @@ async def _finalize_momentum_async(
             "portfolio_snapshot": portfolio_snapshot,
             "peer_summary": peer_summary,
             "peer_rankings": _peer_rankings_for_ticker(ticker, peer_summary),
+            "window_snapshot": snapshot.get("window_snapshot"),
+            "recent_ohlc": snapshot.get("recent_ohlc"),
+            "recent_daily_returns": snapshot.get("recent_daily_returns"),
         }
 
         decision = await async_persona_from_observations(
@@ -450,13 +510,20 @@ async def _finalize_momentum_async(
             default_reasoning="Defaulted to neutral after missing persona response.",
         )
 
+        trend_flags = snapshot["trend_flags"]
+        signal = decision.signal if decision.signal in ALLOWED_SIGNALS else "neutral"
+        raw_confidence = decision.confidence if isinstance(decision.confidence, (int, float)) else 0.0
+        confidence = int(np.clip(raw_confidence, 0, 100))
+        reasoning = decision.reasoning or "Defaulted to neutral after missing persona response."
+        constraints = dict(decision.constraints or {})
+
         payload = {
-            "signal": decision.signal,
-            "confidence": int(np.clip(decision.confidence, 0, 100)),
-            "reasoning": decision.reasoning,
-            "constraints": decision.constraints or {},
+            "signal": signal,
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "constraints": constraints,
             "metrics": snapshot["metrics"],
-            "trend_flags": snapshot["trend_flags"],
+            "trend_flags": trend_flags,
             "meta": {"observations": observations},
         }
         momentum_view[ticker] = payload

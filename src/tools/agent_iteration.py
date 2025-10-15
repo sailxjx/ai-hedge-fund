@@ -66,6 +66,7 @@ class IterationRecord:
     hypotheses: list[IterationHypothesis]
     commands: list[CommandResult]
     status: str
+    metadata: dict[str, object] | None = None
 
 
 class GuardedFiles:
@@ -311,6 +312,7 @@ def iteration_loop(
     extra_guard: Sequence[Path],
     log_path: Path,
     stage: bool,
+    metadata: Mapping[str, object] | None = None,
 ) -> IterationRecord:
     entries = load_diagnostics(diagnostics)
     hypotheses = generate_hypotheses(entries)
@@ -324,6 +326,7 @@ def iteration_loop(
 
     command_results: list[CommandResult] = []
     status = "success"
+    metadata_payload = dict(metadata) if metadata else None
 
     smoke_parts = _list_to_command(smoke_command)
     smoke_result = run_command(smoke_parts, timeout=timeout)
@@ -331,7 +334,7 @@ def iteration_loop(
     if smoke_result.status != "success":
         status = smoke_result.status
         guarded.revert()
-        record = IterationRecord(label, _now_timestamp(), hypotheses, command_results, status)
+        record = IterationRecord(label, _now_timestamp(), hypotheses, command_results, status, metadata_payload)
         append_iteration_log(log_path, record)
         return record
 
@@ -342,7 +345,7 @@ def iteration_loop(
         if pytest_result.status != "success":
             status = pytest_result.status
             guarded.revert()
-            record = IterationRecord(label, _now_timestamp(), hypotheses, command_results, status)
+            record = IterationRecord(label, _now_timestamp(), hypotheses, command_results, status, metadata_payload)
             append_iteration_log(log_path, record)
             return record
 
@@ -353,11 +356,11 @@ def iteration_loop(
         if stage_result.status != "success":
             status = stage_result.status
             guarded.revert()
-            record = IterationRecord(label, _now_timestamp(), hypotheses, command_results, status)
+            record = IterationRecord(label, _now_timestamp(), hypotheses, command_results, status, metadata_payload)
             append_iteration_log(log_path, record)
             return record
 
-    record = IterationRecord(label, _now_timestamp(), hypotheses, command_results, status)
+    record = IterationRecord(label, _now_timestamp(), hypotheses, command_results, status, metadata_payload)
     append_iteration_log(log_path, record)
     return record
 
@@ -420,6 +423,41 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_false",
         help="Skip staging guarded files on success.",
     )
+    parser.add_argument(
+        "--generation-id",
+        help="Tag the iteration with a generation identifier for arena tracking.",
+    )
+    parser.add_argument(
+        "--arena-run-id",
+        help="Identifier for the arena run or tournament bracket driving this iteration.",
+    )
+    parser.add_argument(
+        "--genome-id",
+        action="append",
+        default=[],
+        help="Genome identifier participating in this iteration (repeatable).",
+    )
+    parser.add_argument(
+        "--genome-label",
+        action="append",
+        default=[],
+        help="Human-readable genome label aligned with --genome-id (repeatable).",
+    )
+    parser.add_argument(
+        "--metadata",
+        dest="metadata_kv",
+        action="append",
+        default=[],
+        help="Additional metadata entries in key=value form (repeatable).",
+    )
+    parser.add_argument(
+        "--metadata-file",
+        dest="metadata_files",
+        action="append",
+        type=Path,
+        default=[],
+        help="Path to JSON metadata payloads to merge into the iteration record (repeatable).",
+    )
     parser.set_defaults(stage=True)
     return parser.parse_args(argv)
 
@@ -427,6 +465,34 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     extra_guard = [path if path.is_absolute() else (Path.cwd() / path) for path in args.guard_paths]
+
+    metadata: dict[str, object] = {}
+    if args.generation_id:
+        metadata["generation_id"] = args.generation_id
+    if args.arena_run_id:
+        metadata["arena_run_id"] = args.arena_run_id
+    if args.genome_id:
+        metadata["genome_ids"] = args.genome_id
+    if args.genome_label:
+        metadata["genome_labels"] = args.genome_label
+    for entry in args.metadata_kv:
+        if "=" not in entry:
+            raise ValueError(f"Metadata entry must be key=value, received {entry!r}")
+        key, value = entry.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError(f"Metadata key cannot be empty in entry {entry!r}")
+        metadata[key] = value
+    for path in args.metadata_files:
+        target = path if path.is_absolute() else Path.cwd() / path
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        if isinstance(payload, Mapping):
+            metadata.update(payload)
+        else:
+            raise ValueError(f"Metadata file {target} must contain a JSON object.")
+    metadata_payload = metadata or None
+
     record = iteration_loop(
         diagnostics=args.diagnostics if args.diagnostics.is_absolute() else Path.cwd() / args.diagnostics,
         label=args.label,
@@ -437,6 +503,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         extra_guard=extra_guard,
         log_path=args.log_path if args.log_path.is_absolute() else Path.cwd() / args.log_path,
         stage=args.stage,
+        metadata=metadata_payload,
     )
     if record.status != "success":
         return 1

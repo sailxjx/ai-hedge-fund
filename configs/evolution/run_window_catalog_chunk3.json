@@ -1,0 +1,105 @@
+{
+  "generation_id": "gen-002",
+  "arena_run_id": "arena-window-catalog-part2-chunk3",
+  "model_provider": "azure",
+  "prompt_revision": "observation_only_v1",
+  "diversity_guard": true,
+  "analyst_overlap_threshold": 0.8,
+  "weight_similarity_threshold": 0.9,
+  "genome_registry_path": "log/genomes",
+  "log_dir": "log/arena/gen-002/window_catalog_chunk3",
+  "experiments": [
+    {
+      "label": "2024-04-23_2024-04-29_broad_rally",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "start_date": "2024-04-23",
+      "end_date": "2024-04-29",
+      "analysts_all": false,
+      "analysts": [
+        "cathie_wood",
+        "peter_lynch",
+        "growth_momentum",
+        "momentum_guardian",
+        "regime_meta",
+        "stat_mean_reversion"
+      ],
+      "genome_id": "genome_observation_blend_v1",
+      "note": "Avg 5-day return 11.65%; leader TSLA 36.61%, laggard MSFT 0.32%. Mean volatility 3.36% (peak TSLA 6.17%)."
+    },
+    {
+      "label": "2024-04-24_2024-04-30_volatility_spike",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "start_date": "2024-04-24",
+      "end_date": "2024-04-30",
+      "analysts_all": false,
+      "analysts": [
+        "cathie_wood",
+        "peter_lynch",
+        "growth_momentum",
+        "momentum_guardian",
+        "regime_meta",
+        "stat_mean_reversion"
+      ],
+      "genome_id": "genome_observation_blend_v1",
+      "note": "Avg 5-day return 6.39%; leader TSLA 26.68%, laggard MSFT -4.48%. Mean volatility 3.90% (peak TSLA 7.81%)."
+    },
+    {
+      "label": "2024-08-01_2024-08-07_broad_selloff",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "start_date": "2024-08-01",
+      "end_date": "2024-08-07",
+      "analysts_all": false,
+      "analysts": [
+        "cathie_wood",
+        "peter_lynch",
+        "growth_momentum",
+        "momentum_guardian",
+        "regime_meta",
+        "stat_mean_reversion"
+      ],
+      "genome_id": "genome_observation_blend_v1",
+      "note": "Avg 5-day return -10.09%; leader MSFT -4.76%, laggard TSLA -17.37%. Mean volatility 2.36% (peak NVDA 3.91%)."
+    },
+    {
+      "label": "2024-11-05_2024-11-11_broad_rally",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "start_date": "2024-11-05",
+      "end_date": "2024-11-11",
+      "analysts_all": false,
+      "analysts": [
+        "cathie_wood",
+        "peter_lynch",
+        "growth_momentum",
+        "momentum_guardian",
+        "regime_meta",
+        "stat_mean_reversion"
+      ],
+      "genome_id": "genome_observation_blend_v1",
+      "note": "Avg 5-day return 12.16%; leader TSLA 44.13%, laggard AAPL 1.00%. Mean volatility 2.12% (peak TSLA 4.29%)."
+    }
+  ]
+}

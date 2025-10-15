@@ -23,6 +23,7 @@ from src.tools.api import (
 )
 from src.utils.llm import LLM_ASYNC_MAX_CONCURRENCY
 from src.utils.runtime import async_personas_enabled
+from src.utils.progress import progress
 
 from .benchmarks import BenchmarkCalculator
 from .controller import AgentController
@@ -331,6 +332,8 @@ class BacktestEngine:
             if lookback_start == current_date_str:
                 continue
 
+            progress.set_trading_date(current_date_str)
+
             try:
                 current_prices: Dict[str, float] = {}
                 missing_data = False
@@ -452,6 +455,8 @@ class BacktestEngine:
                     computed = self._perf.compute_metrics(self._portfolio_values, self._benchmark_values)
                 if computed:
                     self._performance_metrics.update(computed)
+
+        progress.set_trading_date(None)
 
         if self._turnover_value_sum > 0:
             self._performance_metrics["turnover_rate"] = self._turnover_notional / self._turnover_value_sum

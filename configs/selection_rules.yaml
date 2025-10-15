@@ -1,0 +1,35 @@
+version: 1
+metadata:
+  description: Baseline arena selection thresholds for 7-day multi-ticker backtests.
+  updated_at: 2025-10-13T00:00:00Z
+gates:
+  min_sharpe: 0.5
+  min_sortino: 0.1
+  min_return_pct: 0.1
+  max_drawdown_pct: -6.0
+  max_turnover_pct: 70.0
+  max_token_cost_usd: 40.0
+  max_async_concurrency_ratio: 2.0
+  min_weight_entropy: 0.8
+fitness:
+  weights:
+    sharpe_ratio: 1.0
+    sortino_ratio: 0.4
+    portfolio_return_pct: 0.35
+    information_ratio: 0.2
+    max_drawdown_pct: 0.6
+    turnover_rate_pct: 0.25
+    token_cost_usd: 0.2
+    async_concurrency_ratio: 0.15
+  penalties:
+    max_drawdown_pct: 1.0
+    turnover_rate_pct: 0.5
+    token_cost_usd: 0.4
+    async_concurrency_ratio: 0.3
+  bonus_tags:
+    novelty: 0.25
+    diversified: 0.15
+promotion:
+  promote_threshold: 0.6
+  hold_threshold: 0.0
+  top_n: 3

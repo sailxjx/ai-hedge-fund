@@ -1,0 +1,782 @@
+{
+  "generated_at": "2025-10-15T03:09:52+00:00",
+  "tickers": [
+    "TSLA",
+    "NVDA",
+    "GOOGL",
+    "MSFT",
+    "AAPL"
+  ],
+  "window_days": 5,
+  "start_date": "2022-10-01",
+  "end_date": "2025-10-14",
+  "methodology": {
+    "metrics": [
+      "mean_return",
+      "min_return",
+      "max_return",
+      "dispersion",
+      "mean_volatility"
+    ],
+    "selection": {
+      "categories": [
+        "broad_rally",
+        "broad_selloff",
+        "dispersion",
+        "volatility_spike"
+      ],
+      "top_n": 6,
+      "min_gap_days": 2
+    }
+  },
+  "windows": [
+    {
+      "category": "broad_selloff",
+      "start_date": "2022-10-05",
+      "end_date": "2022-10-11",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return -8.78%; leader GOOGL -4.39%, laggard TSLA -13.21%. Mean volatility 1.86% (peak NVDA 3.03%).",
+      "metrics": {
+        "mean_return": -0.08778840282140557,
+        "min_return": -0.13205580500320724,
+        "max_return": -0.043880362062180156,
+        "dispersion": 0.08817544294102708,
+        "mean_volatility": 0.018627016260023957,
+        "per_ticker_returns": {
+          "TSLA": -0.13205580500320724,
+          "NVDA": -0.11996962794229304,
+          "GOOGL": -0.043880362062180156,
+          "MSFT": -0.09430247508839595,
+          "AAPL": -0.04873374401095143
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.021574496186583303,
+          "NVDA": 0.030250548614177603,
+          "GOOGL": 0.009555363546415539,
+          "MSFT": 0.01744974829922422,
+          "AAPL": 0.014304924653719134
+        }
+      }
+    },
+    {
+      "category": "volatility_spike",
+      "start_date": "2022-10-25",
+      "end_date": "2022-10-31",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 0.71%; leader TSLA 7.71%, laggard GOOGL -7.81%. Mean volatility 3.57% (peak GOOGL 4.62%).",
+      "metrics": {
+        "mean_return": 0.007057198756604511,
+        "min_return": -0.07813109637143956,
+        "max_return": 0.07711242603550295,
+        "dispersion": 0.1552435224069425,
+        "mean_volatility": 0.03569971065315321,
+        "per_ticker_returns": {
+          "TSLA": 0.07711242603550295,
+          "NVDA": 0.0714285714285714,
+          "GOOGL": -0.07813109637143956,
+          "MSFT": -0.06115267947421621,
+          "AAPL": 0.026028772164603975
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.019983049017006208,
+          "NVDA": 0.034366732760472626,
+          "GOOGL": 0.046247684975566195,
+          "MSFT": 0.039274055806171965,
+          "AAPL": 0.03862703070654907
+        }
+      }
+    },
+    {
+      "category": "dispersion",
+      "start_date": "2022-11-04",
+      "end_date": "2022-11-10",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 7.54%; leader NVDA 17.36%, laggard TSLA -11.42%. Mean volatility 4.44% (peak NVDA 6.51%).",
+      "metrics": {
+        "mean_return": 0.07540305472034155,
+        "min_return": -0.1142074218568575,
+        "max_return": 0.17362146050670635,
+        "dispersion": 0.28782888236356385,
+        "mean_volatility": 0.04436722619426697,
+        "per_ticker_returns": {
+          "TSLA": -0.1142074218568575,
+          "NVDA": 0.17362146050670635,
+          "GOOGL": 0.12597387031043983,
+          "MSFT": 0.13409568261376914,
+          "AAPL": 0.05753168202764991
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.05043336757938879,
+          "NVDA": 0.06511290355171352,
+          "GOOGL": 0.03161134666543756,
+          "MSFT": 0.033843790520074746,
+          "AAPL": 0.04083472265472027
+        }
+      }
+    },
+    {
+      "category": "volatility_spike",
+      "start_date": "2022-11-08",
+      "end_date": "2022-11-14",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 6.35%; leader NVDA 13.99%, laggard TSLA -3.11%. Mean volatility 4.56% (peak NVDA 6.53%).",
+      "metrics": {
+        "mean_return": 0.06352905808888473,
+        "min_return": -0.031104120154252235,
+        "max_return": 0.13986013986013957,
+        "dispersion": 0.1709642600143918,
+        "mean_volatility": 0.04562408674664351,
+        "per_ticker_returns": {
+          "TSLA": -0.031104120154252235,
+          "NVDA": 0.13986013986013957,
+          "GOOGL": 0.08147813312238683,
+          "MSFT": 0.06003423004344577,
+          "AAPL": 0.06737690757270376
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.05049771636790867,
+          "NVDA": 0.06529247915392093,
+          "GOOGL": 0.03316246064346872,
+          "MSFT": 0.037878724490746495,
+          "AAPL": 0.04128905307717275
+        }
+      }
+    },
+    {
+      "category": "broad_selloff",
+      "start_date": "2022-12-14",
+      "end_date": "2022-12-20",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return -9.44%; leader MSFT -5.89%, laggard TSLA -14.38%. Mean volatility 1.75% (peak TSLA 3.13%).",
+      "metrics": {
+        "mean_return": -0.09438261436610447,
+        "min_return": -0.1438334886610747,
+        "max_return": -0.05885100420364309,
+        "dispersion": 0.08498248445743162,
+        "mean_volatility": 0.017505810991820563,
+        "per_ticker_returns": {
+          "TSLA": -0.1438334886610747,
+          "NVDA": -0.10957387935805207,
+          "GOOGL": -0.06912056885914453,
+          "MSFT": -0.05885100420364309,
+          "AAPL": -0.09053413074860794
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.03128173679850327,
+          "NVDA": 0.01002604269228501,
+          "GOOGL": 0.017313057520445044,
+          "MSFT": 0.01369220131050514,
+          "AAPL": 0.015216016637364368
+        }
+      }
+    },
+    {
+      "category": "broad_rally",
+      "start_date": "2023-01-20",
+      "end_date": "2023-01-26",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 12.45%; leader TSLA 26.03%, laggard GOOGL 4.80%. Mean volatility 2.57% (peak TSLA 4.20%).",
+      "metrics": {
+        "mean_return": 0.12450600420526628,
+        "min_return": 0.04803868887694773,
+        "max_return": 0.260281512935441,
+        "dispersion": 0.21224282405849326,
+        "mean_volatility": 0.02569735718456498,
+        "per_ticker_returns": {
+          "TSLA": 0.260281512935441,
+          "NVDA": 0.18067978533094808,
+          "GOOGL": 0.04803868887694773,
+          "MSFT": 0.06928814728581889,
+          "AAPL": 0.06424188659717567
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.04204687324613434,
+          "NVDA": 0.03028097305023645,
+          "GOOGL": 0.029527400581328463,
+          "MSFT": 0.01690262871614781,
+          "AAPL": 0.009728910328977826
+        }
+      }
+    },
+    {
+      "category": "dispersion",
+      "start_date": "2023-01-23",
+      "end_date": "2023-01-27",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 11.60%; leader TSLA 33.34%, laggard GOOGL 1.38%. Mean volatility 2.38% (peak TSLA 4.88%).",
+      "metrics": {
+        "mean_return": 0.11598510186747624,
+        "min_return": 0.013772699449092096,
+        "max_return": 0.3333833008544449,
+        "dispersion": 0.3196106014053528,
+        "mean_volatility": 0.023815058995662438,
+        "per_ticker_returns": {
+          "TSLA": 0.3333833008544449,
+          "NVDA": 0.14125560538116577,
+          "GOOGL": 0.013772699449092096,
+          "MSFT": 0.033053034718175,
+          "AAPL": 0.05846086893450342
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.04882277435715399,
+          "NVDA": 0.026427765923420696,
+          "GOOGL": 0.021486059407445385,
+          "MSFT": 0.013127636443438253,
+          "AAPL": 0.00921105884685386
+        }
+      }
+    },
+    {
+      "category": "dispersion",
+      "start_date": "2023-05-23",
+      "end_date": "2023-05-30",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 7.79%; leader NVDA 28.64%, laggard GOOGL -1.10%. Mean volatility 3.37% (peak NVDA 9.56%).",
+      "metrics": {
+        "mean_return": 0.0778922796885031,
+        "min_return": -0.011035585765693634,
+        "max_return": 0.28640153944836433,
+        "dispersion": 0.29743712521405796,
+        "mean_volatility": 0.03373321863279401,
+        "per_ticker_returns": {
+          "TSLA": 0.06507121300365326,
+          "NVDA": 0.28640153944836433,
+          "GOOGL": -0.011035585765693634,
+          "MSFT": 0.03122859455756899,
+          "AAPL": 0.017795637198622538
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.027075748001192685,
+          "NVDA": 0.09556609988280998,
+          "GOOGL": 0.015191426597640854,
+          "MSFT": 0.020582230897893322,
+          "AAPL": 0.010250587784433217
+        }
+      }
+    },
+    {
+      "category": "dispersion",
+      "start_date": "2024-03-01",
+      "end_date": "2024-03-07",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return -0.98%; leader NVDA 17.14%, laggard TSLA -11.51%. Mean volatility 1.72% (peak TSLA 3.02%).",
+      "metrics": {
+        "mean_return": -0.009802878120821545,
+        "min_return": -0.11506835744006316,
+        "max_return": 0.1714069017823283,
+        "dispersion": 0.2864752592223915,
+        "mean_volatility": 0.01715645873657131,
+        "per_ticker_returns": {
+          "TSLA": -0.11506835744006316,
+          "NVDA": 0.1714069017823283,
+          "GOOGL": -0.02946699407771214,
+          "MSFT": -0.01087902523933848,
+          "AAPL": -0.06500691562932226
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.03019966118600396,
+          "NVDA": 0.012634960288156742,
+          "GOOGL": 0.016226595096339853,
+          "MSFT": 0.015392775263688308,
+          "AAPL": 0.011328301848667706
+        }
+      }
+    },
+    {
+      "category": "broad_selloff",
+      "start_date": "2024-04-15",
+      "end_date": "2024-04-19",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return -8.38%; leader GOOGL -2.31%, laggard TSLA -14.03%. Mean volatility 1.61% (peak NVDA 4.14%).",
+      "metrics": {
+        "mean_return": -0.08375162349683325,
+        "min_return": -0.1403098509207834,
+        "max_return": -0.023077410765231732,
+        "dispersion": 0.11723244015555168,
+        "mean_volatility": 0.016129172973332044,
+        "per_ticker_returns": {
+          "TSLA": -0.1403098509207834,
+          "NVDA": -0.13595645764825937,
+          "GOOGL": -0.023077410765231732,
+          "MSFT": -0.05399383740222807,
+          "AAPL": -0.06542056074766367
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.015529764163446036,
+          "NVDA": 0.04138856931141888,
+          "GOOGL": 0.009434124475231658,
+          "MSFT": 0.008081153682356998,
+          "AAPL": 0.006212253234206661
+        }
+      }
+    },
+    {
+      "category": "broad_rally",
+      "start_date": "2024-04-23",
+      "end_date": "2024-04-29",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 11.65%; leader TSLA 36.61%, laggard MSFT 0.32%. Mean volatility 3.36% (peak TSLA 6.17%).",
+      "metrics": {
+        "mean_return": 0.11645045334531234,
+        "min_return": 0.0032172785315245367,
+        "max_return": 0.36606828581485384,
+        "dispersion": 0.3628510072833293,
+        "mean_volatility": 0.033602611410209746,
+        "per_ticker_returns": {
+          "TSLA": 0.36606828581485384,
+          "NVDA": 0.10362173038229394,
+          "GOOGL": 0.06315587407217804,
+          "MSFT": 0.0032172785315245367,
+          "AAPL": 0.04618909792571135
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.06169397847316247,
+          "NVDA": 0.03323244103144461,
+          "GOOGL": 0.047478552695081125,
+          "MSFT": 0.016219242066663496,
+          "AAPL": 0.009388842784696991
+        }
+      }
+    },
+    {
+      "category": "volatility_spike",
+      "start_date": "2024-04-24",
+      "end_date": "2024-04-30",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 6.39%; leader TSLA 26.68%, laggard MSFT -4.48%. Mean volatility 3.90% (peak TSLA 7.81%).",
+      "metrics": {
+        "mean_return": 0.0638887426853146,
+        "min_return": -0.0447530485560762,
+        "max_return": 0.26679568703345313,
+        "dispersion": 0.31154873558952934,
+        "mean_volatility": 0.039003128888313136,
+        "per_ticker_returns": {
+          "TSLA": 0.26679568703345313,
+          "NVDA": 0.048289250181994925,
+          "GOOGL": 0.028560596486793655,
+          "MSFT": -0.0447530485560762,
+          "AAPL": 0.020551228280407452
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.07805723063057951,
+          "NVDA": 0.03469500644553489,
+          "GOOGL": 0.04937211744880702,
+          "MSFT": 0.01831948082419275,
+          "AAPL": 0.014571809092451546
+        }
+      }
+    },
+    {
+      "category": "broad_selloff",
+      "start_date": "2024-08-01",
+      "end_date": "2024-08-07",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return -10.09%; leader MSFT -4.76%, laggard TSLA -17.37%. Mean volatility 2.36% (peak NVDA 3.91%).",
+      "metrics": {
+        "mean_return": -0.10094613632813801,
+        "min_return": -0.17369759124402118,
+        "max_return": -0.04761563284331294,
+        "dispersion": 0.12608195840070824,
+        "mean_volatility": 0.02356188575492431,
+        "per_ticker_returns": {
+          "TSLA": -0.17369759124402118,
+          "NVDA": -0.1547598701076739,
+          "GOOGL": -0.0734522560335783,
+          "MSFT": -0.04761563284331294,
+          "AAPL": -0.05520533141210371
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.02460340334637732,
+          "NVDA": 0.03912040829939477,
+          "GOOGL": 0.017343539393540042,
+          "MSFT": 0.015352888212260763,
+          "AAPL": 0.021389189523048663
+        }
+      }
+    },
+    {
+      "category": "broad_rally",
+      "start_date": "2024-11-05",
+      "end_date": "2024-11-11",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 12.16%; leader TSLA 44.13%, laggard AAPL 1.00%. Mean volatility 2.12% (peak TSLA 4.29%).",
+      "metrics": {
+        "mean_return": 0.12160007584291695,
+        "min_return": 0.009999549569839283,
+        "max_return": 0.4412782078734976,
+        "dispersion": 0.4312786583036583,
+        "mean_volatility": 0.021212766893952975,
+        "per_ticker_returns": {
+          "TSLA": 0.4412782078734976,
+          "NVDA": 0.06769570011025339,
+          "GOOGL": 0.06564641928622073,
+          "MSFT": 0.023380502374773737,
+          "AAPL": 0.009999549569839283
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.04285518395749329,
+          "NVDA": 0.021891893306890807,
+          "GOOGL": 0.018104568184057274,
+          "MSFT": 0.011913516789645966,
+          "AAPL": 0.011298672231677532
+        }
+      }
+    },
+    {
+      "category": "volatility_spike",
+      "start_date": "2025-01-27",
+      "end_date": "2025-01-31",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return -3.00%; leader AAPL 5.93%, laggard NVDA -15.81%. Mean volatility 3.54% (peak NVDA 8.40%).",
+      "metrics": {
+        "mean_return": -0.029983554935596658,
+        "min_return": -0.15811246669471324,
+        "max_return": 0.05934105395457423,
+        "dispersion": 0.21745352064928747,
+        "mean_volatility": 0.03543038240768398,
+        "per_ticker_returns": {
+          "TSLA": -0.004869890304491031,
+          "NVDA": -0.15811246669471324,
+          "GOOGL": 0.01903001848059538,
+          "MSFT": -0.06530649011394862,
+          "AAPL": 0.05934105395457423
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.019962799650515544,
+          "NVDA": 0.08404761323561052,
+          "GOOGL": 0.02463685171901001,
+          "MSFT": 0.02967134111277905,
+          "AAPL": 0.01883330632050477
+        }
+      }
+    },
+    {
+      "category": "broad_selloff",
+      "start_date": "2025-02-21",
+      "end_date": "2025-02-27",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return -10.51%; leader AAPL -3.47%, laggard TSLA -20.44%. Mean volatility 1.79% (peak NVDA 3.89%).",
+      "metrics": {
+        "mean_return": -0.105063822532443,
+        "min_return": -0.2044300225733634,
+        "max_return": -0.034698775576618046,
+        "dispersion": 0.16973124699674536,
+        "mean_volatility": 0.017900799715860418,
+        "per_ticker_returns": {
+          "TSLA": -0.2044300225733634,
+          "NVDA": -0.14245949611019926,
+          "GOOGL": -0.08701777199826621,
+          "MSFT": -0.056713046403768064,
+          "AAPL": -0.034698775576618046
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.021480561839960447,
+          "NVDA": 0.03890280518064519,
+          "GOOGL": 0.00872578594129669,
+          "MSFT": 0.008633248840974236,
+          "AAPL": 0.011761596776425529
+        }
+      }
+    },
+    {
+      "category": "volatility_spike",
+      "start_date": "2025-03-10",
+      "end_date": "2025-03-14",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return -2.72%; leader NVDA 7.97%, laggard AAPL -10.70%. Mean volatility 3.79% (peak TSLA 8.15%).",
+      "metrics": {
+        "mean_return": -0.027168210474069966,
+        "min_return": -0.10699795039109872,
+        "max_return": 0.07968763865471651,
+        "dispersion": 0.18668558904581523,
+        "mean_volatility": 0.03791817389429127,
+        "per_ticker_returns": {
+          "TSLA": -0.0483115696501315,
+          "NVDA": 0.07968763865471651,
+          "GOOGL": -0.04814218336592657,
+          "MSFT": -0.01207698761790954,
+          "AAPL": -0.10699795039109872
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.08147261001095828,
+          "NVDA": 0.0410228038425815,
+          "GOOGL": 0.024863849314865877,
+          "MSFT": 0.01977068579829018,
+          "AAPL": 0.022460920504760548
+        }
+      }
+    },
+    {
+      "category": "broad_selloff",
+      "start_date": "2025-04-02",
+      "end_date": "2025-04-08",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return -13.56%; leader MSFT -7.23%, laggard AAPL -22.75%. Mean volatility 3.19% (peak TSLA 5.15%).",
+      "metrics": {
+        "mean_return": -0.1355686433892541,
+        "min_return": -0.22747434920919396,
+        "max_return": -0.07229388524032554,
+        "dispersion": 0.15518046396886842,
+        "mean_volatility": 0.03194896125699639,
+        "per_ticker_returns": {
+          "TSLA": -0.1735826566341353,
+          "NVDA": -0.12573763050385844,
+          "GOOGL": -0.07875469535875723,
+          "MSFT": -0.07229388524032554,
+          "AAPL": -0.22747434920919396
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.05147233530902729,
+          "NVDA": 0.044027481124903414,
+          "GOOGL": 0.018632561012831377,
+          "MSFT": 0.012976457959192453,
+          "AAPL": 0.03263597087902741
+        }
+      }
+    },
+    {
+      "category": "volatility_spike",
+      "start_date": "2025-04-03",
+      "end_date": "2025-04-09",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return -1.63%; leader NVDA 3.54%, laggard AAPL -11.18%. Mean volatility 8.03% (peak TSLA 11.70%).",
+      "metrics": {
+        "mean_return": -0.01625833591447794,
+        "min_return": -0.11184063602661998,
+        "max_return": 0.035410251765984446,
+        "dispersion": 0.14725088779260442,
+        "mean_volatility": 0.0803317953843339,
+        "per_ticker_returns": {
+          "TSLA": -0.03734615928702789,
+          "NVDA": 0.035410251765984446,
+          "GOOGL": 0.010634233316352937,
+          "MSFT": 0.02185063065892079,
+          "AAPL": -0.11184063602661998
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.11695045949248525,
+          "NVDA": 0.09730680828637965,
+          "GOOGL": 0.0497006090110305,
+          "MSFT": 0.04910692670616203,
+          "AAPL": 0.08859417342561204
+        }
+      }
+    },
+    {
+      "category": "broad_rally",
+      "start_date": "2025-04-09",
+      "end_date": "2025-04-15",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 13.02%; leader AAPL 17.24%, laggard GOOGL 8.02%. Mean volatility 6.79% (peak TSLA 10.16%).",
+      "metrics": {
+        "mean_return": 0.13019750315939144,
+        "min_return": 0.08023496890117521,
+        "max_return": 0.17236979468739144,
+        "dispersion": 0.09213482578621623,
+        "mean_volatility": 0.06789542416292446,
+        "per_ticker_returns": {
+          "TSLA": 0.1453619399621382,
+          "NVDA": 0.16510903426791246,
+          "GOOGL": 0.08023496890117521,
+          "MSFT": 0.08791177797833982,
+          "AAPL": 0.17236979468739144
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.10163019310058935,
+          "NVDA": 0.08231105493060988,
+          "GOOGL": 0.046103832713733084,
+          "MSFT": 0.04379896842506977,
+          "AAPL": 0.06563307164462032
+        }
+      }
+    },
+    {
+      "category": "broad_rally",
+      "start_date": "2025-04-22",
+      "end_date": "2025-04-28",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 12.87%; leader TSLA 25.66%, laggard GOOGL 8.76%. Mean volatility 1.81% (peak TSLA 3.07%).",
+      "metrics": {
+        "mean_return": 0.1286673055934687,
+        "min_return": 0.08762781878512893,
+        "max_return": 0.2566153846153849,
+        "dispersion": 0.16898756583025598,
+        "mean_volatility": 0.018142790761690987,
+        "per_ticker_returns": {
+          "TSLA": 0.2566153846153849,
+          "NVDA": 0.12196883706531825,
+          "GOOGL": 0.08762781878512893,
+          "MSFT": 0.08921808866117176,
+          "AAPL": 0.08790639884033968
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.030681391822754752,
+          "NVDA": 0.023328030593940004,
+          "GOOGL": 0.013124451455222914,
+          "MSFT": 0.01198059502899833,
+          "AAPL": 0.011599484907538945
+        }
+      }
+    },
+    {
+      "category": "broad_rally",
+      "start_date": "2025-05-08",
+      "end_date": "2025-05-14",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "summary": "Avg 5-day return 12.69%; leader TSLA 25.87%, laggard MSFT 4.52%. Mean volatility 1.76% (peak NVDA 2.64%).",
+      "metrics": {
+        "mean_return": 0.12688495145629033,
+        "min_return": 0.045205953617168504,
+        "max_return": 0.25870682789081134,
+        "dispersion": 0.21350087427364284,
+        "mean_volatility": 0.01764956219303683,
+        "per_ticker_returns": {
+          "TSLA": 0.25870682789081134,
+          "NVDA": 0.15615923458055736,
+          "GOOGL": 0.09241643546043044,
+          "MSFT": 0.045205953617168504,
+          "AAPL": 0.081936305732484
+        },
+        "per_ticker_volatility": {
+          "TSLA": 0.01195436446097879,
+          "NVDA": 0.026381946325391856,
+          "GOOGL": 0.01805038921475114,
+          "MSFT": 0.008663769596886153,
+          "AAPL": 0.023197341367176202
+        }
+      }
+    }
+  ]
+}

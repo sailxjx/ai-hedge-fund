@@ -70,13 +70,44 @@ def _expected_value(prob: float, up_ret: float, down_ret: float) -> float:
     return prob * up_ret + (1.0 - prob) * down_ret
 
 
+def _build_recent_ohlc(frame: pd.DataFrame, limit: int = 12) -> list[dict[str, Any]]:
+    recent = frame.tail(limit)[["open", "high", "low", "close", "volume"]]
+    records: list[dict[str, Any]] = []
+    for index, row in recent.iterrows():
+        dt = index.tz_localize(None) if hasattr(index, "tz") and index.tz is not None else index
+        date_str = dt.date().isoformat() if hasattr(dt, "date") else str(dt)
+        records.append(
+            {
+                "date": date_str,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"] or 0.0),
+            }
+        )
+    return records
+
+
+def _build_recent_returns(frame: pd.DataFrame, limit: int = 12) -> list[dict[str, Any]]:
+    returns = frame["close"].pct_change().tail(limit).dropna()
+    records: list[dict[str, Any]] = []
+    for index, value in returns.items():
+        dt = index.tz_localize(None) if hasattr(index, "tz") and index.tz is not None else index
+        date_str = dt.date().isoformat() if hasattr(dt, "date") else str(dt)
+        records.append({"date": date_str, "daily_return": float(value)})
+    return records
+
+
 PERSONA_NAME = "Nova"
 PERSONA_ROLE = "a momentum surfer who translates logistic edges into positioning guidance"
 PERSONA_BACKSTORY = "Nova rode quantitative momentum models for years and now narrates when the book should lean bullish or bearish."
 PERSONA_INSTRUCTIONS = (
-    "Base the signal entirely on the observed probabilities, expected returns, and drawdown context.",
-    "Set constraints only when the observations justify them; otherwise leave them empty.",
-    "Explain the judgement in first person, citing the observations that drove the decision.",
+    "Anchor every call on the observation payload: logistic probabilities, expected value, volatility ratios, and the raw OHLC tape.",
+    "Spell out whether the evidence is decisive. When probabilities cluster near symmetry or expected value sits inside noise, default to disciplined neutrality and state why.",
+    "Highlight any momentum fractures you see in the raw price table (gaps, reversal days, escalating volume) instead of relying on deterministic numeric thresholds.",
+    "Coordinate with risk and guardian personas by narrating how your stance shifts the whole portfolio rather than swinging the book mechanically.",
+    "Answer in first person, attributing the decision to the observations that mattered and proposing constraints only when the data clearly justifies them.",
 )
 ALLOWED_SIGNALS = ["bullish", "bearish", "neutral"]
 
@@ -144,14 +175,16 @@ def growth_momentum_agent(state: AgentState, agent_id: str = "growth_momentum_ag
         latest_features = X[-1]
 
         weights = _logistic_regression(train_X, train_y)
-        logits = float(latest_features @ weights)
-        raw_prob_up = 1.0 / (1.0 + np.exp(-np.clip(logits, -50, 50)))
+        raw_logit = float(latest_features @ weights)
+        logits = raw_logit * SMOOTHING_FACTOR
+        raw_prob_up = 1.0 / (1.0 + np.exp(-np.clip(raw_logit, -50, 50)))
+        smoothed_prob_up = 1.0 / (1.0 + np.exp(-np.clip(logits, -50, 50)))
 
         calibration_params = get_platt_parameters("growth_momentum", ticker)
         if calibration_params:
             prob_up = apply_platt(logits, calibration_params)
         else:
-            prob_up = raw_prob_up
+            prob_up = smoothed_prob_up
 
         future_returns = features_df.index.to_series().map(df["close"].pct_change().shift(-1)).dropna()
 
@@ -176,16 +209,26 @@ def growth_momentum_agent(state: AgentState, agent_id: str = "growth_momentum_ag
             "std_future": std_future,
             "base_rate": float(train_y.mean()),
             "logit": logits,
+            "raw_logit": raw_logit,
+            "smoothed_prob_up": smoothed_prob_up,
             "calibration_applied": bool(calibration_params),
         }
         if calibration_params:
             indicators["calibration"] = calibration_params
+
+        recent_ohlc = _build_recent_ohlc(df)
+        recent_returns = _build_recent_returns(df)
+        weekly_returns = df["close"].pct_change(periods=5).dropna()
+        weekly_return_value = float(weekly_returns.iloc[-1]) if not weekly_returns.empty else None
+        rolling_weekly_vol = df["close"].pct_change().rolling(5).std(ddof=0).dropna()
+        weekly_vol_value = float(rolling_weekly_vol.iloc[-1]) if not rolling_weekly_vol.empty else None
 
         observations = {
             "ticker": ticker,
             "logistic": {
                 "raw_prob_up": raw_prob_up,
                 "calibrated_prob_up": prob_up,
+                "smoothed_prob_up": smoothed_prob_up,
                 "expected_return": expected,
                 "std_future": std_future,
                 "tolerance": tolerance,
@@ -196,11 +239,17 @@ def growth_momentum_agent(state: AgentState, agent_id: str = "growth_momentum_ag
                 "avg_down": avg_down,
                 "future_return_std": std_future,
             },
+            "recent_ohlc": recent_ohlc,
+            "recent_daily_returns": recent_returns,
+            "window_snapshot": {
+                "lookback_days": 5,
+                "compound_return": weekly_return_value,
+                "realised_volatility": weekly_vol_value,
+            },
             "weights": weights.tolist(),
             "indicators": indicators,
             "calibration": calibration_params,
         }
-
         decision = persona_from_observations(
             state=state,
             agent_id=agent_id,
@@ -214,13 +263,15 @@ def growth_momentum_agent(state: AgentState, agent_id: str = "growth_momentum_ag
             default_confidence=55.0,
             default_reasoning="Defaulted to neutral after observation-only fallback.",
         )
-        confidence = int(np.clip(decision.confidence, 0, 100))
-        constraints = decision.constraints or {}
-
+        signal = decision.signal if decision.signal in ALLOWED_SIGNALS else "neutral"
+        raw_confidence = decision.confidence if isinstance(decision.confidence, (int, float)) else 0.0
+        confidence = int(np.clip(raw_confidence, 0, 100))
+        reasoning = decision.reasoning or "Defaulted to neutral after observation-only fallback."
+        constraints = dict(decision.constraints or {})
         payload: dict[str, Any] = {
-            "signal": decision.signal,
+            "signal": signal,
             "confidence": confidence,
-            "reasoning": decision.reasoning,
+            "reasoning": reasoning,
             "constraints": constraints,
             "indicators": indicators,
             "model_weights": weights.tolist(),
@@ -300,14 +351,16 @@ async def growth_momentum_agent_async(state: AgentState, agent_id: str = "growth
         latest_features = X[-1]
 
         weights = _logistic_regression(train_X, train_y)
-        logits = float(latest_features @ weights)
-        raw_prob_up = 1.0 / (1.0 + np.exp(-np.clip(logits, -50, 50)))
+        raw_logit = float(latest_features @ weights)
+        logits = raw_logit * SMOOTHING_FACTOR
+        raw_prob_up = 1.0 / (1.0 + np.exp(-np.clip(raw_logit, -50, 50)))
+        smoothed_prob_up = 1.0 / (1.0 + np.exp(-np.clip(logits, -50, 50)))
 
         calibration_params = get_platt_parameters("growth_momentum", ticker)
         if calibration_params:
             prob_up = apply_platt(logits, calibration_params)
         else:
-            prob_up = raw_prob_up
+            prob_up = smoothed_prob_up
 
         future_returns = features_df.index.to_series().map(df["close"].pct_change().shift(-1)).dropna()
         up_returns = future_returns[future_returns > 0]
@@ -331,16 +384,26 @@ async def growth_momentum_agent_async(state: AgentState, agent_id: str = "growth
             "std_future": std_future,
             "base_rate": float(train_y.mean()),
             "logit": logits,
+            "raw_logit": raw_logit,
+            "smoothed_prob_up": smoothed_prob_up,
             "calibration_applied": bool(calibration_params),
         }
         if calibration_params:
             indicators["calibration"] = calibration_params
+
+        recent_ohlc = _build_recent_ohlc(df)
+        recent_returns = _build_recent_returns(df)
+        weekly_returns = df["close"].pct_change(periods=5).dropna()
+        weekly_return_value = float(weekly_returns.iloc[-1]) if not weekly_returns.empty else None
+        rolling_weekly_vol = df["close"].pct_change().rolling(5).std(ddof=0).dropna()
+        weekly_vol_value = float(rolling_weekly_vol.iloc[-1]) if not rolling_weekly_vol.empty else None
 
         observations = {
             "ticker": ticker,
             "logistic": {
                 "raw_prob_up": raw_prob_up,
                 "calibrated_prob_up": prob_up,
+                "smoothed_prob_up": smoothed_prob_up,
                 "expected_return": expected,
                 "std_future": std_future,
                 "tolerance": tolerance,
@@ -350,6 +413,13 @@ async def growth_momentum_agent_async(state: AgentState, agent_id: str = "growth
                 "avg_up": avg_up,
                 "avg_down": avg_down,
                 "future_return_std": std_future,
+            },
+            "recent_ohlc": recent_ohlc,
+            "recent_daily_returns": recent_returns,
+            "window_snapshot": {
+                "lookback_days": 5,
+                "compound_return": weekly_return_value,
+                "realised_volatility": weekly_vol_value,
             },
             "weights": weights.tolist(),
             "indicators": indicators,
@@ -369,13 +439,15 @@ async def growth_momentum_agent_async(state: AgentState, agent_id: str = "growth
             default_confidence=55.0,
             default_reasoning="Defaulted to neutral after observation-only fallback.",
         )
-        confidence = int(np.clip(decision.confidence, 0, 100))
-        constraints = decision.constraints or {}
-
+        signal = decision.signal if decision.signal in ALLOWED_SIGNALS else "neutral"
+        raw_confidence = decision.confidence if isinstance(decision.confidence, (int, float)) else 0.0
+        confidence = int(np.clip(raw_confidence, 0, 100))
+        reasoning = decision.reasoning or "Defaulted to neutral after observation-only fallback."
+        constraints = dict(decision.constraints or {})
         payload: dict[str, Any] = {
-            "signal": decision.signal,
+            "signal": signal,
             "confidence": confidence,
-            "reasoning": decision.reasoning,
+            "reasoning": reasoning,
             "constraints": constraints,
             "indicators": indicators,
             "model_weights": weights.tolist(),
@@ -399,3 +471,4 @@ async def growth_momentum_agent_async(state: AgentState, agent_id: str = "growth
         "messages": state["messages"] + [message],
         "data": state["data"],
     }
+SMOOTHING_FACTOR = 0.35

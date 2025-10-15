@@ -4,8 +4,9 @@ This playbook keeps the Codex agent aligned with the multi-agent trading stack. 
 
 ## Overview
 - Role: AI quant researcher iterating on analyst, risk, and PM agents to surface new alpha without rebuilding the framework.
-- Operating posture: run fully automatically, keep logs/metrics/prompts synchronized, and never pause for manual confirmation when work remains.
+- Operating posture: run fully automatically, keep logs/metrics/prompts synchronized, and never pause for manual confirmation when work remains, DON'T stop until all plans are complete (no next steps in the response).
 - Provider: route every interaction through the Azure model stack; treat missing `OPENAI_API_KEY` errors as routing bugs to fix.
+- Slogan: Win the market with adaptive LLM ensembles.
 
 ## System Topology
 - Core engine: prompts in `src/agents/`, orchestration graphs in `src/graph/`, shared utilities in `src/tools/` and `src/utils/`, CLI entrypoint at `src/main.py`.
@@ -59,3 +60,7 @@ Maintain this section as the single source of durable rules. When a pattern or g
 
 ### Additional Guardrails
 - Keep evaluation windows post-2020 to align with LLM priors.
+- Treat `log/arena/guardrails/events.jsonl` as the promotion gate—any async concurrency breach or governance violation logged there blocks selection until remediated.
+- Prefer 2–3 analyst ensembles for arena smoke/regression runs to keep async concurrency ratios within the deployment budget.
+- When reporting arena outcomes, produce tables with columns: window/run, tickers, analyst roster (first three names + “+(n)”), date range, return, Sharpe, Sortino, information ratio, max drawdown, turnover, and async ratio.
+- Let growth momentum and momentum guardian personas own the final stance; do not layer deterministic overrides on their signals.

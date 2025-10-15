@@ -1,0 +1,53 @@
+{
+  "generation_id": "gen-001",
+  "arena_run_id": "arena-oct24-regime",
+  "model_provider": "azure",
+  "prompt_revision": "baseline_v1",
+  "diversity_guard": true,
+  "analyst_overlap_threshold": 0.8,
+  "weight_similarity_threshold": 0.9,
+  "genome_registry_path": "log/genomes",
+  "log_dir": "log/arena/gen-001/regime_mix",
+  "experiments": [
+    {
+      "label": "october_week_1_growth_regime_mix_v1",
+      "tickers": ["TSLA", "NVDA", "GOOGL"],
+      "start_date": "2024-10-01",
+      "end_date": "2024-10-07",
+      "analysts_all": false,
+      "analysts": ["cathie_wood", "peter_lynch", "growth_momentum", "momentum_guardian", "regime_meta"],
+      "genome_id": "genome_growth_regime_mix_v1",
+      "note": "regime mix week1"
+    },
+    {
+      "label": "october_week_2_growth_regime_mix_v1",
+      "tickers": ["TSLA", "NVDA", "GOOGL"],
+      "start_date": "2024-10-08",
+      "end_date": "2024-10-14",
+      "analysts_all": false,
+      "analysts": ["cathie_wood", "peter_lynch", "growth_momentum", "momentum_guardian", "regime_meta"],
+      "genome_id": "genome_growth_regime_mix_v1",
+      "note": "regime mix week2"
+    },
+    {
+      "label": "growth_regime_mix_v1_regression_202411",
+      "tickers": ["TSLA", "NVDA", "GOOGL"],
+      "start_date": "2024-11-04",
+      "end_date": "2024-11-10",
+      "analysts_all": false,
+      "analysts": ["cathie_wood", "peter_lynch", "growth_momentum", "momentum_guardian", "regime_meta"],
+      "genome_id": "genome_growth_regime_mix_v1",
+      "note": "regime mix regression nov"
+    },
+    {
+      "label": "growth_regime_mix_v1_regression_202412",
+      "tickers": ["TSLA", "NVDA", "GOOGL"],
+      "start_date": "2024-12-02",
+      "end_date": "2024-12-08",
+      "analysts_all": false,
+      "analysts": ["cathie_wood", "peter_lynch", "growth_momentum", "momentum_guardian", "regime_meta"],
+      "genome_id": "genome_growth_regime_mix_v1",
+      "note": "regime mix regression dec"
+    }
+  ]
+}

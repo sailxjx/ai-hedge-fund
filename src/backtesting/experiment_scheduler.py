@@ -11,6 +11,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -20,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
+from src.tools.genome_registry import EvolutionGenome, GenomeLineageRegistry
+from src.tools.genome_validation import validate_diversity
 from src.tools.llm_backtest_digest import BacktestDigest, parse_backtest_digest
 
 DEFAULT_TIMEOUT_SECONDS = 3600
@@ -32,6 +35,24 @@ ASYNC_LEDGER_COLUMNS = [
     "async_semaphore_utilization",
     "async_slowest_agent",
     "async_slowest_agent_avg_seconds",
+    "async_concurrency_limit",
+]
+
+GENOME_LEDGER_COLUMNS = [
+    "generation_id",
+    "arena_run_id",
+    "genome_id",
+    "genome_label",
+    "genome_path",
+    "genome_revision",
+    "analyst_weights",
+    "patriarch_variant",
+    "async_mode",
+    "model_name",
+    "token_cost_usd",
+    "llm_budget_used_usd",
+    "metadata_path",
+    "extra_tags",
 ]
 
 CSV_HEADER = [
@@ -55,7 +76,367 @@ CSV_HEADER = [
     "delta_portfolio_return_pct",
     "delta_sharpe_ratio",
     "delta_max_drawdown_pct",
-] + ASYNC_LEDGER_COLUMNS
+] + GENOME_LEDGER_COLUMNS + ASYNC_LEDGER_COLUMNS
+
+
+def _parse_env_int(name: str) -> int | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _coerce_float(value: object | None) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        text = str(value).strip()
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _find_lingering_backtesters() -> list[int]:
+    if os.name != "posix":
+        return []
+    try:
+        output = subprocess.check_output(["pgrep", "-f", "src/backtester.py"], text=True)
+    except FileNotFoundError:
+        return []
+    except subprocess.CalledProcessError:
+        return []
+    pids: list[int] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        if pid <= 0 or pid == os.getpid():
+            continue
+        pids.append(pid)
+    return sorted(set(pids))
+
+
+def _terminate_pid(pid: int, *, timeout: float = 5.0) -> bool:
+    if os.name != "posix":
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return False
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return True
+
+
+def _log_guardrail_event(log_dir: Path, payload: Mapping[str, object]) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / "events.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def _evaluate_governance_signals(digest: BacktestDigest) -> tuple[list[str], list[str]]:
+    violations: list[str] = []
+    warnings: list[str] = []
+
+    risk = digest.risk
+    if risk:
+        if risk.remaining_limit is not None and risk.remaining_limit < 0:
+            violations.append(f"Remaining risk limit negative ({risk.remaining_limit}).")
+        for note in risk.constraint_notes:
+            lower = note.lower()
+            if any(keyword in lower for keyword in ("violation", "breach", "override failure")):
+                violations.append(f"Constraint note indicates violation: {note}")
+            elif note:
+                warnings.append(f"Constraint note: {note}")
+        if risk.overrides:
+            overrides = ", ".join(f"{key}={value}" for key, value in sorted(risk.overrides.items()))
+            warnings.append(f"Risk overrides active: {overrides}")
+
+    for anomaly in digest.anomalies:
+        description = f"{anomaly.type}: {anomaly.message}".strip()
+        warnings.append(f"Arena anomaly detected: {description}")
+
+    return violations, warnings
+
+
+def _enforce_post_run_guardrails(
+    *,
+    experiment: Experiment,
+    digest: BacktestDigest,
+    async_telemetry: Mapping[str, object] | None,
+    guardrail_log_dir: Path,
+) -> None:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    violations: list[str] = []
+
+    limit_env = _parse_env_int("LLM_ASYNC_MAX_CONCURRENCY")
+    observed_limit = _coerce_float(async_telemetry.get("async_concurrency_limit")) if async_telemetry else None
+
+    if async_telemetry:
+        if limit_env is not None and observed_limit is not None and observed_limit > float(limit_env):
+            message = (
+                f"Async concurrency limit {observed_limit} exceeded configured cap {limit_env} "
+                f"for experiment {experiment.label}."
+            )
+            violations.append(message)
+            _log_guardrail_event(
+                guardrail_log_dir,
+                {
+                    "timestamp": timestamp,
+                    "severity": "violation",
+                    "category": "async_concurrency_limit",
+                    "experiment": experiment.label,
+                    "generation_id": experiment.generation_id,
+                    "arena_run_id": experiment.arena_run_id,
+                    "genome_id": experiment.genome_id,
+                    "message": message,
+                },
+            )
+
+        ratio = _coerce_float(async_telemetry.get("async_concurrency_ratio"))
+        if ratio is not None:
+            reference_limit = float(limit_env) if limit_env is not None else observed_limit
+            warning_threshold: float
+            violation_threshold: float
+            if reference_limit is not None:
+                warning_threshold = reference_limit * 1.05
+                violation_threshold = reference_limit * 2.0
+            else:
+                warning_threshold = 1.05
+                violation_threshold = 1.5
+
+            if ratio > violation_threshold:
+                message = (
+                    f"Async concurrency ratio {ratio:.2f} exceeded violation threshold {violation_threshold:.2f} "
+                    f"for experiment {experiment.label}."
+                )
+                violations.append(message)
+                _log_guardrail_event(
+                    guardrail_log_dir,
+                    {
+                        "timestamp": timestamp,
+                        "severity": "violation",
+                        "category": "async_concurrency_ratio",
+                        "experiment": experiment.label,
+                        "generation_id": experiment.generation_id,
+                        "arena_run_id": experiment.arena_run_id,
+                        "genome_id": experiment.genome_id,
+                        "message": message,
+                    },
+                )
+            elif ratio > warning_threshold:
+                message = (
+                    f"Async concurrency ratio {ratio:.2f} exceeded warning threshold {warning_threshold:.2f} "
+                    f"for experiment {experiment.label}."
+                )
+                _log_guardrail_event(
+                    guardrail_log_dir,
+                    {
+                        "timestamp": timestamp,
+                        "severity": "warning",
+                        "category": "async_concurrency_ratio",
+                        "experiment": experiment.label,
+                        "generation_id": experiment.generation_id,
+                        "arena_run_id": experiment.arena_run_id,
+                        "genome_id": experiment.genome_id,
+                        "message": message,
+                    },
+                )
+    elif limit_env is not None and observed_limit is None:
+        _log_guardrail_event(
+            guardrail_log_dir,
+            {
+                "timestamp": timestamp,
+                "severity": "warning",
+                "category": "async_concurrency",
+                "experiment": experiment.label,
+                "generation_id": experiment.generation_id,
+                "arena_run_id": experiment.arena_run_id,
+                "genome_id": experiment.genome_id,
+                "message": "Async telemetry missing concurrency_limit despite guardrail configuration.",
+            },
+        )
+
+    lingering = _find_lingering_backtesters()
+    if lingering:
+        terminated: list[int] = []
+        for pid in lingering:
+            if _terminate_pid(pid):
+                terminated.append(pid)
+        _log_guardrail_event(
+            guardrail_log_dir,
+            {
+                "timestamp": timestamp,
+                "severity": "warning",
+                "category": "process_cleanup",
+                "experiment": experiment.label,
+                "generation_id": experiment.generation_id,
+                "arena_run_id": experiment.arena_run_id,
+                "genome_id": experiment.genome_id,
+                "message": f"Lingering src/backtester.py processes detected: {lingering}",
+                "terminated": terminated,
+            },
+        )
+
+    governance_violations, governance_warnings = _evaluate_governance_signals(digest)
+    for warning in governance_warnings:
+        _log_guardrail_event(
+            guardrail_log_dir,
+            {
+                "timestamp": timestamp,
+                "severity": "warning",
+                "category": "governance",
+                "experiment": experiment.label,
+                "generation_id": experiment.generation_id,
+                "arena_run_id": experiment.arena_run_id,
+                "genome_id": experiment.genome_id,
+                "message": warning,
+            },
+        )
+    for violation in governance_violations:
+        violations.append(violation)
+        _log_guardrail_event(
+            guardrail_log_dir,
+            {
+                "timestamp": timestamp,
+                "severity": "violation",
+                "category": "governance",
+                "experiment": experiment.label,
+                "generation_id": experiment.generation_id,
+                "arena_run_id": experiment.arena_run_id,
+                "genome_id": experiment.genome_id,
+                "message": violation,
+            },
+        )
+
+    if violations:
+        combined = "; ".join(violations)
+        raise ExperimentRunError(f"Guardrail violation detected: {combined}")
+
+
+def _sanitize_slug(text: str, *, default: str = "item") -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_")
+    return slug.lower() or default
+
+
+def _emit_arena_reports(
+    *,
+    base_dir: Path,
+    experiment: Experiment,
+    metrics: Metrics,
+    deltas: tuple[float | None, float | None, float | None],
+    async_telemetry: Mapping[str, object] | None,
+    timing_summary_path: Path | None,
+    timestamp: datetime,
+) -> None:
+    generation = experiment.generation_id or "ungrouped"
+    genome = experiment.genome_id or "no_genome"
+    generation_slug = _sanitize_slug(generation, default="generation")
+    genome_slug = _sanitize_slug(genome, default="genome")
+    label_slug = _sanitize_slug(experiment.label, default="experiment")
+
+    target_dir = base_dir / generation_slug / genome_slug
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = {
+        "timestamp": timestamp.isoformat(),
+        "label": experiment.label,
+        "generation_id": experiment.generation_id,
+        "arena_run_id": experiment.arena_run_id,
+        "genome_id": experiment.genome_id,
+        "genome_label": experiment.genome_label,
+        "genome_path": str(experiment.genome_path) if experiment.genome_path else None,
+        "tickers": experiment.tickers,
+        "start_date": experiment.start_date,
+        "end_date": experiment.end_date,
+        "prompt_revision": experiment.prompt_revision,
+        "baseline_label": experiment.baseline_label,
+        "note": experiment.note,
+        "log_path": str(experiment.log_path),
+        "metrics": {
+            "portfolio_return_pct": metrics.portfolio_return_pct,
+            "sharpe_ratio": metrics.sharpe_ratio,
+            "sortino_ratio": metrics.sortino_ratio,
+            "max_drawdown_pct": metrics.max_drawdown_pct,
+            "information_ratio": metrics.information_ratio,
+            "benchmark_return_pct": metrics.benchmark_return_pct,
+            "turnover_rate_pct": metrics.turnover_rate_pct,
+        },
+        "deltas": {
+            "portfolio_return_pct": deltas[0],
+            "sharpe_ratio": deltas[1],
+            "max_drawdown_pct": deltas[2],
+        },
+        "async_telemetry": async_telemetry or None,
+        "timing_summary_path": str(timing_summary_path) if timing_summary_path else None,
+        "patriarch_variant": experiment.patriarch_variant,
+        "analyst_weights": experiment.analyst_weights,
+        "metadata_path": str(experiment.metadata_path) if experiment.metadata_path else None,
+        "extra_tags": list(experiment.extra_tags or []),
+        "token_cost_usd": experiment.token_cost_usd,
+        "llm_budget_used_usd": experiment.llm_budget_used_usd,
+        "async_mode": experiment.async_mode,
+        "model_name": experiment.model_name,
+    }
+
+    json_path = target_dir / f"{label_slug}.json"
+    json_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+
+    markdown_lines = [
+        f"# {experiment.label}",
+        "",
+        f"- Generation: {experiment.generation_id or 'n/a'}",
+        f"- Genome: {experiment.genome_id or 'n/a'}",
+        f"- Window: {experiment.start_date} → {experiment.end_date}",
+        f"- Tickers: {', '.join(experiment.tickers)}",
+        f"- Prompt Revision: {experiment.prompt_revision}",
+        f"- Portfolio Return: {summary['metrics']['portfolio_return_pct']}%",
+        f"- Sharpe Ratio: {summary['metrics']['sharpe_ratio']}",
+        f"- Max Drawdown: {summary['metrics']['max_drawdown_pct']}%",
+        f"- Baseline Delta (return): {summary['deltas']['portfolio_return_pct']}",
+        f"- Note: {experiment.note or '—'}",
+        "",
+        f"Log: `{experiment.log_path}`",
+    ]
+    if timing_summary_path:
+        markdown_lines.append(f"Timing Summary: `{timing_summary_path}`")
+    markdown_lines.append("")
+
+    md_path = target_dir / f"{label_slug}.md"
+    md_path.write_text("\n".join(markdown_lines), encoding="utf-8")
 
 
 class ExperimentRunError(RuntimeError):
@@ -78,6 +459,20 @@ class Experiment:
     extra_args: list[str] | None = None
     note: str | None = None
     timeout_seconds: int | None = None
+    generation_id: str | None = None
+    arena_run_id: str | None = None
+    genome_id: str | None = None
+    genome_label: str | None = None
+    genome_revision: str | None = None
+    analyst_weights: Mapping[str, float] | None = None
+    patriarch_variant: str | None = None
+    async_mode: str | None = None
+    model_name: str | None = None
+    token_cost_usd: float | None = None
+    llm_budget_used_usd: float | None = None
+    genome_path: Path | None = None
+    metadata_path: Path | None = None
+    extra_tags: Sequence[str] | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object], *, now: datetime | None = None) -> "Experiment":
@@ -107,6 +502,59 @@ class Experiment:
                 raise ValueError("tickers cannot be empty")
             return tickers
 
+        def _as_optional_str(value: object | None) -> str | None:
+            if value is None:
+                return None
+            text = str(value).strip()
+            return text or None
+
+        def _as_optional_float(value: object | None) -> float | None:
+            if value is None:
+                return None
+            if isinstance(value, (float, int)):
+                return float(value)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    return None
+                try:
+                    return float(stripped)
+                except ValueError as exc:
+                    raise ValueError(f"Expected float-compatible value, got {value!r}") from exc
+            return None
+
+        def _as_weights(value: object | None) -> Mapping[str, float] | None:
+            if value is None:
+                return None
+            if isinstance(value, Mapping):
+                weights: dict[str, float] = {}
+                for key, raw in value.items():
+                    try:
+                        weights[str(key)] = float(raw)  # type: ignore[arg-type]
+                    except (TypeError, ValueError):
+                        continue
+                return weights or None
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    return None
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError as exc:  # pragma: no cover - invalid config guarded upstream
+                    raise ValueError("analyst_weights must be a mapping or JSON string") from exc
+                if not isinstance(parsed, Mapping):
+                    raise ValueError("analyst_weights JSON must decode to a mapping")
+                return _as_weights(parsed)
+            raise ValueError("analyst_weights must be a mapping or JSON string")
+
+        def _as_optional_path(value: object | None) -> Path | None:
+            if value is None:
+                return None
+            text = str(value).strip()
+            if not text:
+                return None
+            return Path(text).expanduser()
+
         required_fields = {"label", "start_date", "end_date"}
         missing = [field for field in required_fields if field not in payload or not str(payload[field]).strip()]
         if missing:
@@ -128,10 +576,26 @@ class Experiment:
         analysts_all = bool(payload.get("analysts_all", True))
         analysts = _as_str_list(payload.get("analysts")) if not analysts_all else None
         extra_args = _as_str_list(payload.get("extra_args"))
-        note = str(payload["note"]).strip() if payload.get("note") else None
+        note = _as_optional_str(payload.get("note"))
         timeout_seconds = None
         if payload.get("timeout_seconds") is not None:
             timeout_seconds = int(payload["timeout_seconds"])
+
+        generation_id = _as_optional_str(payload.get("generation_id"))
+        arena_run_id = _as_optional_str(payload.get("arena_run_id"))
+        genome_id = _as_optional_str(payload.get("genome_id"))
+        genome_label = _as_optional_str(payload.get("genome_label"))
+        genome_revision = _as_optional_str(payload.get("genome_revision"))
+        analyst_weights = _as_weights(payload.get("analyst_weights"))
+        patriarch_variant = _as_optional_str(payload.get("patriarch_variant"))
+        async_mode = _as_optional_str(payload.get("async_mode"))
+        model_name = _as_optional_str(payload.get("model_name"))
+        token_cost_usd = _as_optional_float(payload.get("token_cost_usd"))
+        llm_budget_used_usd = _as_optional_float(payload.get("llm_budget_used_usd"))
+        metadata_path_value = payload.get("metadata_path")
+        metadata_path = _as_optional_path(metadata_path_value)
+        genome_path = _as_optional_path(payload.get("genome_path"))
+        extra_tags = _as_str_list(payload.get("extra_tags"))
 
         return cls(
             label=label,
@@ -146,6 +610,20 @@ class Experiment:
             extra_args=extra_args,
             note=note,
             timeout_seconds=timeout_seconds,
+            generation_id=generation_id,
+            arena_run_id=arena_run_id,
+            genome_id=genome_id,
+            genome_label=genome_label,
+            genome_revision=genome_revision,
+            analyst_weights=analyst_weights,
+            patriarch_variant=patriarch_variant,
+            async_mode=async_mode,
+            model_name=model_name,
+            token_cost_usd=token_cost_usd,
+            llm_budget_used_usd=llm_budget_used_usd,
+            genome_path=genome_path,
+            metadata_path=metadata_path,
+            extra_tags=extra_tags,
         )
 
 
@@ -202,6 +680,7 @@ def _extract_async_telemetry(summary: Mapping[str, object] | None) -> dict[str, 
         "async_semaphore_utilization": _coerce(async_meta.get("semaphore_utilization")),
         "async_slowest_agent": async_meta.get("slowest_agent"),
         "async_slowest_agent_avg_seconds": _coerce(async_meta.get("slowest_agent_avg_seconds")),
+        "async_concurrency_limit": _coerce(async_meta.get("concurrency_limit")),
     }
     return telemetry
 
@@ -479,6 +958,34 @@ def append_ledger_row(
         "delta_sharpe_ratio": _format_optional(deltas[1]),
         "delta_max_drawdown_pct": _format_optional(deltas[2]),
     }
+
+    def _weights_to_json(weights: Mapping[str, float] | None) -> str:
+        if not weights:
+            return ""
+        try:
+            return json.dumps(dict(sorted(weights.items())), separators=(",", ":"), sort_keys=True)
+        except TypeError:
+            return ""
+
+    row.update(
+        {
+            "generation_id": experiment.generation_id or "",
+            "arena_run_id": experiment.arena_run_id or "",
+            "genome_id": experiment.genome_id or "",
+            "genome_label": experiment.genome_label or "",
+            "genome_path": str(experiment.genome_path) if experiment.genome_path else "",
+            "genome_revision": experiment.genome_revision or "",
+            "analyst_weights": _weights_to_json(experiment.analyst_weights),
+            "patriarch_variant": experiment.patriarch_variant or "",
+            "async_mode": experiment.async_mode or ("async" if async_telemetry else ""),
+            "model_name": experiment.model_name or "",
+            "token_cost_usd": _format_optional(experiment.token_cost_usd),
+            "llm_budget_used_usd": _format_optional(experiment.llm_budget_used_usd),
+            "metadata_path": str(experiment.metadata_path) if experiment.metadata_path else "",
+            "extra_tags": ",".join(experiment.extra_tags) if experiment.extra_tags else "",
+        }
+    )
+
     if async_telemetry:
         row.update(
             {
@@ -489,6 +996,7 @@ def append_ledger_row(
                 "async_semaphore_utilization": _format_optional(async_telemetry.get("async_semaphore_utilization")),
                 "async_slowest_agent": str(async_telemetry.get("async_slowest_agent") or ""),
                 "async_slowest_agent_avg_seconds": _format_optional(async_telemetry.get("async_slowest_agent_avg_seconds")),
+                "async_concurrency_limit": _format_optional(async_telemetry.get("async_concurrency_limit"), precision=0),
             }
         )
     else:
@@ -511,6 +1019,12 @@ def schedule_experiments(
     timeout_override: int | None = None,
     include_async_telemetry: bool = False,
     timing_dir: Path | None = None,
+    genome_registry: GenomeLineageRegistry | None = None,
+    diversity_guard: bool = False,
+    analyst_overlap_threshold: float = 0.8,
+    weight_similarity_threshold: float = 0.9,
+    arena_report_dir: Path | None = None,
+    guardrail_log_dir: Path | None = None,
 ) -> list[tuple[Experiment, Metrics]]:
     """Execute the experiment schedule and append results to the ledger."""
 
@@ -518,8 +1032,31 @@ def schedule_experiments(
     cached_metrics: dict[str, Metrics] = {}
     timing_directory = timing_dir or Path("log") / "backtest_timings"
 
+    validated_genomes: dict[str, list[EvolutionGenome]] = {}
+
+    guardrail_directory = guardrail_log_dir or (Path("log") / "arena" / "guardrails")
+
     for experiment in experiments:
         experiment.log_path.parent.mkdir(parents=True, exist_ok=True)
+        if diversity_guard and genome_registry and experiment.genome_id:
+            try:
+                genome = genome_registry.load(experiment.genome_id)
+            except FileNotFoundError as exc:  # pragma: no cover - configuration error
+                raise ExperimentRunError(f"Genome '{experiment.genome_id}' not found for experiment '{experiment.label}'") from exc
+            generation_key = experiment.generation_id or genome.generation_id or "default"
+            cohort = validated_genomes.setdefault(generation_key, [])
+            is_valid, assessment = validate_diversity(
+                genome,
+                cohort,
+                analyst_overlap_threshold=analyst_overlap_threshold,
+                weight_similarity_threshold=weight_similarity_threshold,
+            )
+            if not is_valid:
+                warning_text = "; ".join(assessment.warnings) or "diversity guard triggered"
+                raise ExperimentRunError(
+                    f"Genome '{experiment.genome_id}' failed diversity guard: {warning_text}"
+                )
+            cohort.append(genome)
         command = build_backtest_command(experiment, model_provider=model_provider, entrypoint=entrypoint)
         timeout = experiment.timeout_seconds or timeout_override or DEFAULT_TIMEOUT_SECONDS
         command_runner(command, timeout)
@@ -541,12 +1078,26 @@ def schedule_experiments(
 
         timing_summary_path: Path | None = None
         async_telemetry: Mapping[str, object] | None = None
-        if include_async_telemetry:
+        need_async_meta = include_async_telemetry or os.getenv("LLM_ASYNC_MAX_CONCURRENCY")
+        if need_async_meta:
             timing_summary_path, _, async_telemetry = locate_timing_summary(experiment, timing_dir=timing_directory)
+
+        recorded_at = datetime.now(timezone.utc)
+
+        _enforce_post_run_guardrails(
+            experiment=experiment,
+            digest=digest,
+            async_telemetry=async_telemetry,
+            guardrail_log_dir=guardrail_directory,
+        )
+
+        if not include_async_telemetry:
+            timing_summary_path = None
+            async_telemetry = None
 
         append_ledger_row(
             ledger_path,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=recorded_at,
             experiment=experiment,
             metrics=metrics,
             baseline_label=experiment.baseline_label,
@@ -554,6 +1105,17 @@ def schedule_experiments(
             timing_summary_path=timing_summary_path,
             async_telemetry=async_telemetry,
         )
+
+        if arena_report_dir is not None:
+            _emit_arena_reports(
+                base_dir=arena_report_dir,
+                experiment=experiment,
+                metrics=metrics,
+                deltas=deltas,
+                async_telemetry=async_telemetry,
+                timing_summary_path=timing_summary_path,
+                timestamp=recorded_at,
+            )
 
         cached_metrics[experiment.label] = metrics
         results.append((experiment, metrics))
@@ -566,11 +1128,112 @@ def _load_schedule(path: Path, *, now: datetime | None = None) -> tuple[list[Exp
     if not isinstance(raw, Mapping):
         raise ValueError("Schedule config must be a JSON object")
 
-    experiments_payload = raw.get("experiments")
-    if not isinstance(experiments_payload, list):
-        raise ValueError("Config missing 'experiments' list")
+    now = now or datetime.now(timezone.utc)
 
-    experiments = [Experiment.from_mapping(item, now=now) for item in experiments_payload if isinstance(item, Mapping)]
+    def _with_defaults(payload: Mapping[str, object]) -> dict[str, object]:
+        merged = dict(payload)
+        if raw.get("generation_id") and not merged.get("generation_id"):
+            merged["generation_id"] = raw["generation_id"]
+        if raw.get("arena_run_id") and not merged.get("arena_run_id"):
+            merged["arena_run_id"] = raw["arena_run_id"]
+        if raw.get("prompt_revision") and not merged.get("prompt_revision"):
+            merged["prompt_revision"] = raw["prompt_revision"]
+        if raw.get("model_name") and not merged.get("model_name"):
+            merged["model_name"] = raw["model_name"]
+        if raw.get("async_mode") and not merged.get("async_mode"):
+            merged["async_mode"] = raw["async_mode"]
+        if raw.get("genome_id") and not merged.get("genome_id"):
+            merged["genome_id"] = raw["genome_id"]
+        if raw.get("genome_path") and not merged.get("genome_path"):
+            merged["genome_path"] = raw["genome_path"]
+        return merged
+
+    experiments: list[Experiment] = []
+    experiments_payload = raw.get("experiments")
+    if isinstance(experiments_payload, list):
+        for item in experiments_payload:
+            if not isinstance(item, Mapping):
+                continue
+            experiments.append(Experiment.from_mapping(_with_defaults(item), now=now))
+
+    ticker_bundles = raw.get("ticker_bundles")
+    windows = raw.get("windows")
+    log_dir_value = raw.get("log_dir")
+    log_dir: Path | None = Path(str(log_dir_value)).expanduser() if log_dir_value else None
+    if log_dir is not None:
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+    if isinstance(ticker_bundles, list) and isinstance(windows, list):
+        for window in windows:
+            if not isinstance(window, Mapping):
+                continue
+            start_date = str(window.get("start_date", "")).strip()
+            end_date = str(window.get("end_date", "")).strip()
+            if not start_date or not end_date:
+                raise ValueError("Window entries require start_date and end_date")
+            window_label = str(window.get("label", f"{start_date}_to_{end_date}")).strip()
+            window_generation = window.get("generation_id") or raw.get("generation_id")
+            window_prompt = window.get("prompt_revision") or raw.get("prompt_revision")
+            window_note = window.get("note")
+            window_baseline = window.get("baseline_label")
+            window_arena = window.get("arena_run_id") or raw.get("arena_run_id")
+
+            for bundle in ticker_bundles:
+                if not isinstance(bundle, Mapping):
+                    continue
+                tickers = bundle.get("tickers")
+                if not tickers:
+                    raise ValueError("ticker_bundles entries require tickers")
+                bundle_label = str(bundle.get("label", "_".join(str(t).upper() for t in tickers))).strip()
+                label = f"{window_label}_{bundle_label}" if bundle_label else window_label
+                genome_id = bundle.get("genome_id") or window.get("genome_id") or raw.get("genome_id")
+                genome_path = bundle.get("genome_path") or window.get("genome_path") or raw.get("genome_path")
+                prompt_revision = bundle.get("prompt_revision") or window_prompt or raw.get("prompt_revision", "baseline")
+                analysts_all = bundle.get("analysts_all", True)
+                analysts = bundle.get("analysts") if not analysts_all else None
+                baseline_label = bundle.get("baseline_label") or window_baseline
+                note = bundle.get("note") or window_note
+                log_path_value = bundle.get("log_path") or window.get("log_path")
+                if log_path_value:
+                    log_path = Path(str(log_path_value)).expanduser()
+                elif log_dir is not None:
+                    slug = f"{label}_{start_date.replace('-', '')}_{end_date.replace('-', '')}.log"
+                    log_path = log_dir / slug
+                else:
+                    log_path = default_log_path(label, start_date, end_date, now=now)
+
+                payload: dict[str, object] = {
+                    "label": label,
+                    "tickers": tickers,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "log_path": str(log_path),
+                    "prompt_revision": prompt_revision,
+                    "baseline_label": baseline_label,
+                    "analysts_all": analysts_all,
+                }
+                if analysts is not None:
+                    payload["analysts"] = analysts
+                if note:
+                    payload["note"] = note
+                if genome_id:
+                    payload["genome_id"] = genome_id
+                if genome_path:
+                    payload["genome_path"] = genome_path
+                if window_generation:
+                    payload.setdefault("generation_id", window_generation)
+                if window_arena:
+                    payload.setdefault("arena_run_id", window_arena)
+                if bundle.get("extra_args"):
+                    payload["extra_args"] = bundle["extra_args"]
+                if bundle.get("timeout_seconds"):
+                    payload["timeout_seconds"] = bundle["timeout_seconds"]
+                if bundle.get("note"):
+                    payload["note"] = bundle["note"]
+                experiments.append(Experiment.from_mapping(_with_defaults(payload), now=now))
+
+    if not experiments:
+        raise ValueError("Schedule configuration produced no experiments")
 
     timeout_raw = raw.get("timeout_seconds")
     timeout_seconds: int | None = None
@@ -580,12 +1243,40 @@ def _load_schedule(path: Path, *, now: datetime | None = None) -> tuple[list[Exp
         except (TypeError, ValueError) as exc:
             raise ValueError("timeout_seconds must be an integer") from exc
 
+    def _as_float(value: object | None, default: float) -> float:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    genome_registry_path_value = raw.get("genome_registry_path")
+    genome_registry_path = Path(str(genome_registry_path_value)).expanduser() if genome_registry_path_value else None
+    arena_report_dir_value = raw.get("arena_report_dir")
+    arena_report_dir = Path(str(arena_report_dir_value)).expanduser() if arena_report_dir_value else None
+    if log_dir is not None:
+        arena_report_dir = log_dir
+    guardrail_log_dir_value = raw.get("guardrail_log_dir")
+    guardrail_log_dir = Path(str(guardrail_log_dir_value)).expanduser() if guardrail_log_dir_value else None
+
     meta = {
         "model_provider": str(raw.get("model_provider", "azure")),
         "timeout_seconds": timeout_seconds,
         "ledger_path": Path(str(raw.get("ledger_path", "log/backtest.csv"))).expanduser(),
         "include_async_telemetry": bool(raw.get("include_async_telemetry", False)),
+        "generation_id": raw.get("generation_id"),
+        "arena_run_id": raw.get("arena_run_id"),
+        "diversity_guard": bool(raw.get("diversity_guard", False)),
+        "analyst_overlap_threshold": _as_float(raw.get("analyst_overlap_threshold"), 0.8),
+        "weight_similarity_threshold": _as_float(raw.get("weight_similarity_threshold"), 0.9),
     }
+    if genome_registry_path:
+        meta["genome_registry_path"] = genome_registry_path
+    if arena_report_dir is not None:
+        meta["arena_report_dir"] = arena_report_dir
+    if guardrail_log_dir is not None:
+        meta["guardrail_log_dir"] = guardrail_log_dir
 
     return experiments, meta
 
@@ -630,6 +1321,13 @@ def _default_schedule(now: datetime | None = None) -> tuple[list[Experiment], di
         "ledger_path": Path("log/backtest.csv"),
         "timeout_seconds": None,
         "include_async_telemetry": False,
+        "generation_id": None,
+        "arena_run_id": None,
+        "diversity_guard": False,
+        "analyst_overlap_threshold": 0.8,
+        "weight_similarity_threshold": 0.9,
+        "genome_registry_path": None,
+        "arena_report_dir": Path("log") / "arena",
     }
     return defaults, meta
 
@@ -670,6 +1368,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     timeout_override = args.timeout if args.timeout is not None else meta_timeout
     include_async_telemetry = args.include_async_telemetry or bool(meta.get("include_async_telemetry"))
 
+    genome_registry: GenomeLineageRegistry | None = None
+    registry_path = meta.get("genome_registry_path")
+    if registry_path:
+        genome_registry = GenomeLineageRegistry(root=Path(str(registry_path)).expanduser())
+
+    arena_report_dir_meta = meta.get("arena_report_dir")
+    if arena_report_dir_meta is None:
+        arena_report_dir = Path("log") / "arena"
+    else:
+        arena_report_dir = Path(str(arena_report_dir_meta)).expanduser()
+
+    def _extract_float(value: object | None, default: float) -> float:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    diversity_guard = bool(meta.get("diversity_guard", False))
+    analyst_overlap_threshold = _extract_float(meta.get("analyst_overlap_threshold"), 0.8)
+    weight_similarity_threshold = _extract_float(meta.get("weight_similarity_threshold"), 0.9)
+
     if args.dry_run:
         for experiment in experiments:
             command = build_backtest_command(experiment, model_provider=model_provider)
@@ -683,6 +1404,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         ledger_path=ledger_path,
         timeout_override=timeout_override,
         include_async_telemetry=include_async_telemetry,
+        genome_registry=genome_registry,
+        diversity_guard=diversity_guard,
+        analyst_overlap_threshold=analyst_overlap_threshold,
+        weight_similarity_threshold=weight_similarity_threshold,
+        arena_report_dir=arena_report_dir,
     )
 
     for experiment, metrics in results:

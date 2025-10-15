@@ -64,6 +64,7 @@ PERSONA_BACKSTORY = "Morgan interpreted macro regimes for multi-asset desks and 
 PERSONA_INSTRUCTIONS = (
     "Use the probabilities and feature snapshot to judge the dominant regime.",
     "You may override the model recommendation when qualitative context or conflicting signals warrant it.",
+    "Highlight when momentum/risk desks should slow turnover or avoid aggressive short exposure, especially during rally regimes.",
     "Speak in first person and cite the key probabilities/metrics that shaped your call.",
 )
 ALLOWED_SIGNALS = ["rally", "crash", "consolidation", "neutral"]

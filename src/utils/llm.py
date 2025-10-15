@@ -5,6 +5,7 @@ import concurrent.futures
 import json
 import os
 from collections.abc import Callable
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -39,6 +40,74 @@ def _get_async_llm_semaphore() -> asyncio.Semaphore:
     return _ASYNC_LLM_SEMAPHORE
 
 
+def coerce_content_to_text(content: Any) -> str:
+    """
+    Normalize Responses API content blocks into a plain text string.
+    This keeps legacy parsing paths working when models return typed content.
+    """
+
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, dict):
+        if isinstance(content.get("text"), str):
+            return content["text"]
+        if isinstance(content.get("content"), str):
+            return content["content"]
+        # Fallback: stable JSON for unexpected shapes
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(content)
+
+    if isinstance(content, list):
+        segments: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                segments.append(block)
+                continue
+            if isinstance(block, dict):
+                block_type = block.get("type")
+                if block_type in {"text", "output_text"} and block.get("text"):
+                    segments.append(str(block["text"]))
+                    continue
+                if block_type == "refusal" and block.get("refusal"):
+                    segments.append(str(block["refusal"]))
+                    continue
+                if block_type == "reasoning":
+                    summary = block.get("summary")
+                    if isinstance(summary, list):
+                        for item in summary:
+                            if isinstance(item, dict) and item.get("text"):
+                                segments.append(str(item["text"]))
+                            elif isinstance(item, str):
+                                segments.append(item)
+                    elif isinstance(summary, str):
+                        segments.append(summary)
+                    continue
+                if block_type == "tool_call":
+                    name = block.get("name") or block.get("type")
+                    args = block.get("args") or block.get("arguments")
+                    segments.append(f"[tool_call:{name}] {args}")
+                    continue
+                # Generic fallback for typed content
+                if block.get("text"):
+                    segments.append(str(block["text"]))
+                    continue
+                try:
+                    segments.append(json.dumps(block, ensure_ascii=False))
+                except (TypeError, ValueError):
+                    segments.append(str(block))
+            else:
+                segments.append(str(block))
+        return "\n".join(segment for segment in segments if segment).strip()
+
+    return str(content)
+
+
 def _resolve_model_configuration(state: AgentState | None, agent_name: str | None) -> tuple[str, str]:
     if state and agent_name:
         model_name, model_provider = get_agent_model_config(state, agent_name)
@@ -66,16 +135,26 @@ def _initialize_llm(
 ):
     model_info = get_model_info(model_name, model_provider)
     llm = get_model(model_name, model_provider, api_keys)
+    supports_structured = False
     if llm is None:
-        return None, model_info
+        return None, model_info, supports_structured
 
-    if not (model_info and not model_info.has_json_mode()):
+    provider_token = str(getattr(model_provider, "value", model_provider or "")).lower()
+    if model_info is not None:
+        supports_structured = model_info.has_json_mode()
+    else:
+        # Fall back to provider heuristics when the catalog entry is missing.
+        # Google Gemini and DeepSeek models do not support LangChain's JSON mode.
+        if provider_token not in {"google", "deepseek"}:
+            supports_structured = True
+
+    if supports_structured:
         llm = llm.with_structured_output(
             pydantic_model,
             method="json_mode",
         )
 
-    return llm, model_info
+    return llm, model_info, supports_structured
 
 
 def call_llm(
@@ -103,7 +182,7 @@ def call_llm(
     model_name, model_provider = _resolve_model_configuration(state, agent_name)
     api_keys = _extract_api_keys(state)
 
-    llm, model_info = _initialize_llm(
+    llm, _, supports_structured = _initialize_llm(
         model_name=model_name,
         model_provider=model_provider,
         api_keys=api_keys,
@@ -125,7 +204,7 @@ def call_llm(
             result = _invoke_with_timeout(llm, prompt, LLM_CALL_TIMEOUT_SECONDS)
 
             # For non-JSON support models, we need to extract and parse the JSON manually
-            if model_info and not model_info.has_json_mode():
+            if not supports_structured:
                 parsed_result = extract_json_from_response(result.content)
                 if parsed_result:
                     return pydantic_model(**parsed_result)
@@ -172,7 +251,7 @@ async def async_call_llm(
     model_name, model_provider = _resolve_model_configuration(state, agent_name)
     api_keys = _extract_api_keys(state)
 
-    llm, model_info = _initialize_llm(
+    llm, _, supports_structured = _initialize_llm(
         model_name=model_name,
         model_provider=model_provider,
         api_keys=api_keys,
@@ -194,7 +273,7 @@ async def async_call_llm(
             try:
                 result = await _ainvoke_with_timeout(llm, prompt, LLM_CALL_TIMEOUT_SECONDS)
 
-                if model_info and not model_info.has_json_mode():
+                if not supports_structured:
                     parsed_result = extract_json_from_response(result.content)
                     if parsed_result:
                         return pydantic_model(**parsed_result)
@@ -248,12 +327,22 @@ def create_default_response(model_class: type[BaseModel]) -> BaseModel:
     return model_class(**default_values)
 
 
-def extract_json_from_response(content: str) -> dict | None:
-    """Extracts JSON from markdown-formatted response."""
+def extract_json_from_response(content: Any) -> dict | None:
+    """Extract JSON objects from Responses/Chat API payloads."""
+    text_content = coerce_content_to_text(content)
+    if not text_content:
+        return None
+
+    # Try direct JSON first before falling back to fenced blocks
     try:
-        json_start = content.find("```json")
+        return json.loads(text_content)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+
+    try:
+        json_start = text_content.find("```json")
         if json_start != -1:
-            json_text = content[json_start + 7 :]  # Skip past ```json
+            json_text = text_content[json_start + 7 :]  # Skip past ```json
             json_end = json_text.find("```")
             if json_end != -1:
                 json_text = json_text[:json_end].strip()

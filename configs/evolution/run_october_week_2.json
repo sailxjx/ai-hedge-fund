@@ -1,0 +1,31 @@
+{
+  "generation_id": "gen-001",
+  "arena_run_id": "arena-oct24",
+  "model_provider": "azure",
+  "prompt_revision": "baseline_v1",
+  "diversity_guard": true,
+  "analyst_overlap_threshold": 0.8,
+  "weight_similarity_threshold": 0.9,
+  "genome_registry_path": "log/genomes",
+  "log_dir": "log/arena/gen-001",
+  "experiments": [
+    {
+      "label": "october_week_2_value",
+      "tickers": ["TSLA", "AAPL", "MSFT"],
+      "start_date": "2024-10-08",
+      "end_date": "2024-10-14",
+      "genome_id": "genome_value_v1",
+      "note": "second week value rotation"
+    },
+    {
+      "label": "october_week_2_growth",
+      "tickers": ["TSLA", "NVDA", "GOOGL"],
+      "start_date": "2024-10-08",
+      "end_date": "2024-10-14",
+      "analysts_all": false,
+      "analysts": ["cathie_wood", "peter_lynch", "growth_momentum"],
+      "genome_id": "genome_growth_v1",
+      "note": "second week growth rotation"
+    }
+  ]
+}

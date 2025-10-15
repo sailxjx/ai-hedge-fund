@@ -23,6 +23,7 @@ from src.cli.input import parse_cli_inputs
 from src.graph.state import AgentState
 from src.utils.analysts import get_analyst_nodes
 from src.utils.display import print_trading_output
+from src.utils.llm import coerce_content_to_text
 from src.utils.progress import progress
 from src.utils.runtime import async_personas_enabled
 
@@ -33,17 +34,18 @@ init(autoreset=True)
 
 
 def parse_hedge_fund_response(response):
-    """Parses a JSON string and returns a dictionary."""
+    """Parses the final LLM response payload into a dictionary."""
+    normalized_response = coerce_content_to_text(response)
     try:
-        return json.loads(response)
+        return json.loads(normalized_response)
     except json.JSONDecodeError as e:
-        print(f"JSON decoding error: {e}\nResponse: {repr(response)}")
+        print(f"JSON decoding error: {e}\nResponse: {repr(normalized_response)}")
         return None
     except TypeError as e:
         print(f"Invalid response type (expected string, got {type(response).__name__}): {e}")
         return None
     except Exception as e:
-        print(f"Unexpected error while parsing response: {e}\nResponse: {repr(response)}")
+        print(f"Unexpected error while parsing response: {e}\nResponse: {repr(normalized_response)}")
         return None
 
 

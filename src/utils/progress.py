@@ -25,6 +25,7 @@ class AgentProgress:
         self.table: Table | None = None
         self.live: Live | None = None
         self.started = False
+        self.current_trading_date: str | None = None
         self.update_handlers: List[Callable[[str, Optional[str], str, Optional[str], str], None]] = []
         self._log_path = Path("log") / "backtest_progress.log"
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,6 +66,7 @@ class AgentProgress:
         self.live = None
         self.table = None
         self.started = False
+        self.current_trading_date = None
         self._loop = None
         self._loop_thread_id = None
 
@@ -116,6 +118,8 @@ class AgentProgress:
             "ticker": status_entry.get("ticker"),
             "status": status_entry.get("status"),
         }
+        if self.current_trading_date:
+            log_entry["trading_date"] = self.current_trading_date
         if analysis:
             log_entry["analysis"] = analysis[:500]
         if elapsed is not None:
@@ -189,6 +193,10 @@ class AgentProgress:
     async def aupdate_status(self, agent_name: str, ticker: Optional[str] = None, status: str = "", analysis: Optional[str] = None):
         """Async-friendly status update helper."""
         self.update_status(agent_name, ticker, status, analysis)
+
+    def set_trading_date(self, trading_date: Optional[str]) -> None:
+        """Annotate subsequent log entries with the active trading date."""
+        self.current_trading_date = trading_date
 
 
 # Create a global instance
