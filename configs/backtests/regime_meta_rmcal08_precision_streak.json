@@ -1,0 +1,32 @@
+{
+  "model_provider": "azure",
+  "timeout_seconds": 9000,
+  "experiments": [
+    {
+      "label": "tsla_regime_meta_rmcal08_precision_streak_20250902_20250920",
+      "tickers": [
+        "TSLA"
+      ],
+      "start_date": "2025-09-02",
+      "end_date": "2025-09-20",
+      "log_path": "log/backtest_tsla_regime_meta_rmcal08_precision_streak_20250902_20250920.log",
+      "prompt_revision": "regime_meta_rmcal08",
+      "analysts_all": true,
+      "baseline_label": "tsla_regime_meta_rmcal08_precision_20250902_20250920",
+      "note": "rmcal08_precision_streak"
+    },
+    {
+      "label": "nvda_regime_meta_rmcal08_precision_streak_20250701_20250722",
+      "tickers": [
+        "NVDA"
+      ],
+      "start_date": "2025-07-01",
+      "end_date": "2025-07-22",
+      "log_path": "log/backtest_nvda_regime_meta_rmcal08_precision_streak_20250701_20250722.log",
+      "prompt_revision": "regime_meta_rmcal08",
+      "analysts_all": true,
+      "baseline_label": "nvda_regime_meta_rmcal08_precision_20250701_20250722",
+      "note": "rmcal08_precision_streak"
+    }
+  ]
+}

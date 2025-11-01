@@ -1,0 +1,20 @@
+{
+  "cash": 100902.13,
+  "margin_used": 902.13,
+  "margin_requirement": 0.5,
+  "positions": {
+    "TSLA": {
+      "long": 0,
+      "short": 6,
+      "long_cost_basis": 0.0,
+      "short_cost_basis": 300.71,
+      "short_margin_used": 902.13
+    }
+  },
+  "realized_gains": {
+    "TSLA": {
+      "long": 0.0,
+      "short": 0.0
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "model_provider": "azure",
+  "timeout_seconds": 4200,
+  "experiments": [
+    {
+      "label": "tsla_regime_meta_rmcal08_softboost_20250902_20250920",
+      "tickers": ["TSLA"],
+      "start_date": "2025-09-02",
+      "end_date": "2025-09-20",
+      "log_path": "log/backtest_tsla_regime_meta_rmcal08_softboost_20250902_20250920.log",
+      "prompt_revision": "regime_meta_rmcal08",
+      "analysts_all": true,
+      "baseline_label": "tsla_regime_meta_rmcal08_boost_20250902_20250920",
+      "note": "rmcal08_softboost"
+    }
+  ]
+}

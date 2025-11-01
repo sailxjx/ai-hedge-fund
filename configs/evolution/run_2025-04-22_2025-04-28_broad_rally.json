@@ -1,0 +1,36 @@
+{
+  "generation_id": "gen-002",
+  "arena_run_id": "arena-window-2025-04-22_2025-04-28_broad_rally",
+  "model_provider": "azure",
+  "prompt_revision": "observation_only_v1",
+  "diversity_guard": true,
+  "analyst_overlap_threshold": 0.8,
+  "weight_similarity_threshold": 0.9,
+  "genome_registry_path": "log/genomes",
+  "log_dir": "log/arena/gen-002/window_single/2025-04-22_2025-04-28_broad_rally",
+  "experiments": [
+    {
+      "label": "2025-04-22_2025-04-28_broad_rally",
+      "tickers": [
+        "TSLA",
+        "NVDA",
+        "GOOGL",
+        "MSFT",
+        "AAPL"
+      ],
+      "start_date": "2025-04-22",
+      "end_date": "2025-04-28",
+      "analysts_all": false,
+      "analysts": [
+        "cathie_wood",
+        "peter_lynch",
+        "growth_momentum",
+        "momentum_guardian",
+        "regime_meta",
+        "stat_mean_reversion"
+      ],
+      "genome_id": "genome_observation_blend_v1",
+      "note": "Avg 5-day return 12.87%; leader TSLA 25.66%, laggard GOOGL 8.76%. Mean volatility 1.81% (peak TSLA 3.07%)."
+    }
+  ]
+}

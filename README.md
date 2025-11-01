@@ -63,7 +63,7 @@ cd ai-hedge-fund
 
 ### 2. Set up API keys
 
-Create a `.env` file for your API keys:
+Create a `.env` file for your API keys and optional tuning knobs:
 ```bash
 # Create .env file for your API keys (in the root directory)
 cp .env.example .env
@@ -76,6 +76,12 @@ OPENAI_API_KEY=your-openai-api-key
 
 # For getting financial data to power the hedge fund
 FINANCIAL_DATASETS_API_KEY=your-financial-datasets-api-key
+
+# Optional: constrain company-news fetches to avoid long hangs
+# Seconds spent gathering paginated news per ticker (default 60)
+COMPANY_NEWS_FETCH_TIMEOUT_SECONDS=60
+# Maximum news pages per ticker (default 8)
+COMPANY_NEWS_MAX_PAGES=8
 ```
 
 **Important**: You must set at least one LLM API key (e.g. `OPENAI_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, or `DEEPSEEK_API_KEY`) for the hedge fund to work. 
@@ -83,6 +89,45 @@ FINANCIAL_DATASETS_API_KEY=your-financial-datasets-api-key
 **Financial Data**: Data for AAPL, GOOGL, MSFT, NVDA, and TSLA is free and does not require an API key. For any other ticker, you will need to set the `FINANCIAL_DATASETS_API_KEY` in the .env file.
 
 ## How to Run
+
+### Observation-First Personas
+
+All analyst agents now emit raw observations and delegate trade intent to their anthropomorphic personas. When extending the platform, focus on enriching the observation payloads instead of encoding rule-based signals. See `src/agents/persona_utils.py::persona_from_observations` for the shared helper that every analyst uses to package metrics for the LLM personas. Backtest summaries now include turnover rate so you can quickly sanity-check how much gross notional the persona ensemble traded over the window.
+
+### Async Persona Parallelism
+
+Async persona execution is **enabled by default**. The CLI (`src/main.py`), the LangGraph backend, and the Python backtester automatically dispatch analyst, risk, and portfolio personas through the async graph. Set `ASYNC_PERSONAS=0` (or `false`, `off`) to fall back to the legacy synchronous execution when bisecting regressions. The async engine fans out LLM work in parallel while guarding shared state with `src/utils/async_state.py` and concurrency semaphores in `src/utils/llm.py`.
+
+See `docs/async_parallelism.md` for a deeper walkthrough covering scheduler flags, telemetry payloads, and the validation loop.
+
+- Async telemetry: pass `--include-async-telemetry` to `poetry run python -m src.backtesting.experiment_scheduler` (or set `include_async_telemetry` in your schedule JSON) to append timing metadata columns to `log/backtest.csv`. The scheduler will automatically locate summaries under `log/backtest_timings/` and record concurrency ratio, semaphore utilization, and the raw summary path alongside the usual performance metrics.
+
+- CLI smoke (async is default):
+  ```bash
+  poetry run python src/main.py --model-provider azure --analysts-all --tickers TSLA
+  ```
+- Backtester async run:
+  ```bash
+  poetry run python src/backtester.py --tickers TSLA,NVDA --start-date 2024-10-01 --end-date 2024-10-03
+  ```
+- Legacy sync fallback (optional):
+  ```bash
+  ASYNC_PERSONAS=0 poetry run python src/main.py --model-provider azure --analysts-all --tickers TSLA
+  ```
+- Backend + web app inherit the default; export `ASYNC_PERSONAS=0` before starting `uvicorn` only when you need to force sync dispatch.
+
+Configurability:
+- `LLM_ASYNC_MAX_CONCURRENCY` caps simultaneous persona LLM calls (default `8`).
+- `LLM_CALL_TIMEOUT_SECONDS` / `LLM_MAX_RETRIES` cover async retries just like the sync helpers.
+- `ASYNC_PERSONAS=0` explicitly forces the legacy synchronous flow (set `1`/`true` to re-enable async if you previously disabled it).
+
+Regression coverage lives in `tests/agents/test_async_persona.py`, `tests/agents/test_async_wrappers.py`, `tests/backtesting/test_async_engine.py`, and `tests/backend/test_graph_service.py`. Run them locally with:
+```bash
+poetry run pytest tests/agents/test_async_persona.py \
+  tests/agents/test_async_wrappers.py \
+  tests/backtesting/test_async_engine.py \
+  tests/backend/test_graph_service.py
+```
 
 ### ⌨️ Command Line Interface
 
@@ -129,6 +174,17 @@ poetry run python src/backtester.py --ticker AAPL,MSFT,NVDA
 
 
 Note: The `--ollama`, `--start-date`, and `--end-date` flags work for the backtester, as well!
+Add `--portfolio-seed path/to/snapshot.json` to seed the run with a preexisting portfolio state (e.g., short hangover replays).
+
+#### Summarize Backtest Logs
+```bash
+poetry run python -m src.backtesting.evaluate_logs \
+  --logs baseline=log/backtest_baseline_crash.log candidate=log/backtest_ml_crash.log \
+  --overrides baseline=log/risk_overrides/backtest_baseline_crash.jsonl candidate=log/risk_overrides/backtest_ml_crash.jsonl \
+  --output log/backtest_metrics/summary.csv
+```
+Use `--json` to emit machine-readable summaries capturing Sharpe/Sortino/return plus override counts for regression tracking.
+
 
 ### 🖥️ Web Application
 

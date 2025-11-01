@@ -1,26 +1,30 @@
 from __future__ import annotations
 
 import json
-from typing_extensions import Literal
+
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
+from typing_extensions import Literal
 
 from src.graph.state import AgentState, show_agent_reasoning
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage
-
 from src.tools.api import (
     get_financial_metrics,
+    get_financial_metrics_async,
     get_market_cap,
+    get_market_cap_async,
     search_line_items,
+    search_line_items_async,
 )
 from src.utils.api_key import get_api_key_from_state
-from src.utils.llm import call_llm
+from src.utils.async_state import update_analyst_signals_async
+from src.utils.llm import async_call_llm, call_llm
 from src.utils.progress import progress
 
 
 class AswathDamodaranSignal(BaseModel):
     signal: Literal["bullish", "bearish", "neutral"]
-    confidence: float          # 0‒100
+    confidence: float  # 0‒100
     reasoning: str
 
 
@@ -33,10 +37,10 @@ def aswath_damodaran_agent(state: AgentState, agent_id: str = "aswath_damodaran_
       • Cross-check with relative valuation (PE vs. Fwd PE sector median proxy)
     Produces a trading signal and explanation in Damodaran's analytical voice.
     """
-    data      = state["data"]
-    end_date  = data["end_date"]
-    tickers   = data["tickers"]
-    api_key  = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+    data = state["data"]
+    end_date = data["end_date"]
+    tickers = data["tickers"]
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
 
     analysis_data: dict[str, dict] = {}
     damodaran_signals: dict[str, dict] = {}
@@ -80,28 +84,13 @@ def aswath_damodaran_agent(state: AgentState, agent_id: str = "aswath_damodaran_
         relative_val_analysis = analyze_relative_valuation(metrics)
 
         # ─── Score & margin of safety ──────────────────────────────────────────
-        total_score = (
-            growth_analysis["score"]
-            + risk_analysis["score"]
-            + relative_val_analysis["score"]
-        )
+        total_score = growth_analysis["score"] + risk_analysis["score"] + relative_val_analysis["score"]
         max_score = growth_analysis["max_score"] + risk_analysis["max_score"] + relative_val_analysis["max_score"]
 
         intrinsic_value = intrinsic_val_analysis["intrinsic_value"]
-        margin_of_safety = (
-            (intrinsic_value - market_cap) / market_cap if intrinsic_value and market_cap else None
-        )
-
-        # Decision rules (Damodaran tends to act with ~20-25 % MOS)
-        if margin_of_safety is not None and margin_of_safety >= 0.25:
-            signal = "bullish"
-        elif margin_of_safety is not None and margin_of_safety <= -0.25:
-            signal = "bearish"
-        else:
-            signal = "neutral"
+        margin_of_safety = (intrinsic_value - market_cap) / market_cap if intrinsic_value and market_cap else None
 
         analysis_data[ticker] = {
-            "signal": signal,
             "score": total_score,
             "max_score": max_score,
             "margin_of_safety": margin_of_safety,
@@ -132,6 +121,104 @@ def aswath_damodaran_agent(state: AgentState, agent_id: str = "aswath_damodaran_
         show_agent_reasoning(damodaran_signals, "Aswath Damodaran Agent")
 
     state["data"]["analyst_signals"][agent_id] = damodaran_signals
+    progress.update_status(agent_id, None, "Done")
+
+    return {"messages": [message], "data": state["data"]}
+
+
+async def aswath_damodaran_agent_async(state: AgentState, agent_id: str = "aswath_damodaran_agent"):
+    """
+    Analyze US equities through Aswath Damodaran's intrinsic-value lens:
+      • Cost of Equity via CAPM (risk-free + β·ERP)
+      • 5-yr revenue / FCFF growth trends & reinvestment efficiency
+      • FCFF-to-Firm DCF → equity value → per-share intrinsic value
+      • Cross-check with relative valuation (PE vs. Fwd PE sector median proxy)
+    Produces a trading signal and explanation in Damodaran's analytical voice.
+    """
+    data = state["data"]
+    end_date = data["end_date"]
+    tickers = data["tickers"]
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+
+    analysis_data: dict[str, dict] = {}
+    damodaran_signals: dict[str, dict] = {}
+
+    for ticker in tickers:
+        # ─── Fetch core data ────────────────────────────────────────────────────
+        progress.update_status(agent_id, ticker, "Fetching financial metrics")
+        metrics = await get_financial_metrics_async(ticker, end_date, period="ttm", limit=5, api_key=api_key)
+
+        progress.update_status(agent_id, ticker, "Fetching financial line items")
+        line_items = await search_line_items_async(
+            ticker,
+            [
+                "free_cash_flow",
+                "ebit",
+                "interest_expense",
+                "capital_expenditure",
+                "depreciation_and_amortization",
+                "outstanding_shares",
+                "net_income",
+                "total_debt",
+            ],
+            end_date,
+            api_key=api_key,
+        )
+
+        progress.update_status(agent_id, ticker, "Getting market cap")
+        market_cap = await get_market_cap_async(ticker, end_date, api_key=api_key)
+
+        # ─── Analyses ───────────────────────────────────────────────────────────
+        progress.update_status(agent_id, ticker, "Analyzing growth and reinvestment")
+        growth_analysis = analyze_growth_and_reinvestment(metrics, line_items)
+
+        progress.update_status(agent_id, ticker, "Analyzing risk profile")
+        risk_analysis = analyze_risk_profile(metrics, line_items)
+
+        progress.update_status(agent_id, ticker, "Calculating intrinsic value (DCF)")
+        intrinsic_val_analysis = calculate_intrinsic_value_dcf(metrics, line_items, risk_analysis)
+
+        progress.update_status(agent_id, ticker, "Assessing relative valuation")
+        relative_val_analysis = analyze_relative_valuation(metrics)
+
+        # ─── Score & margin of safety ──────────────────────────────────────────
+        total_score = growth_analysis["score"] + risk_analysis["score"] + relative_val_analysis["score"]
+        max_score = growth_analysis["max_score"] + risk_analysis["max_score"] + relative_val_analysis["max_score"]
+
+        intrinsic_value = intrinsic_val_analysis["intrinsic_value"]
+        margin_of_safety = (intrinsic_value - market_cap) / market_cap if intrinsic_value and market_cap else None
+
+        analysis_data[ticker] = {
+            "score": total_score,
+            "max_score": max_score,
+            "margin_of_safety": margin_of_safety,
+            "growth_analysis": growth_analysis,
+            "risk_analysis": risk_analysis,
+            "relative_val_analysis": relative_val_analysis,
+            "intrinsic_val_analysis": intrinsic_val_analysis,
+            "market_cap": market_cap,
+        }
+
+        # ─── LLM: craft Damodaran-style narrative ──────────────────────────────
+        progress.update_status(agent_id, ticker, "Generating Damodaran analysis")
+        damodaran_output = await generate_damodaran_output_async(
+            ticker=ticker,
+            analysis_data=analysis_data,
+            state=state,
+            agent_id=agent_id,
+        )
+
+        damodaran_signals[ticker] = damodaran_output.model_dump()
+
+        progress.update_status(agent_id, ticker, "Done", analysis=damodaran_output.reasoning)
+
+    # ─── Push message back to graph state ──────────────────────────────────────
+    message = HumanMessage(content=json.dumps(damodaran_signals), name=agent_id)
+
+    if state["metadata"]["show_reasoning"]:
+        show_agent_reasoning(damodaran_signals, "Aswath Damodaran Agent")
+
+    await update_analyst_signals_async(state, agent_id, damodaran_signals)
     progress.update_status(agent_id, None, "Done")
 
     return {"messages": [message], "data": state["data"]}
@@ -323,12 +410,7 @@ def calculate_intrinsic_value_dcf(metrics: list, line_items: list, risk_analysis
         g += g_step
 
     # Terminal value (perpetuity with terminal growth)
-    tv = (
-        fcff0
-        * (1 + terminal_growth)
-        / (discount - terminal_growth)
-        / (1 + discount) ** years
-    )
+    tv = fcff0 * (1 + terminal_growth) / (discount - terminal_growth) / (1 + discount) ** years
 
     equity_value = pv_sum + tv
     intrinsic_per_share = equity_value / shares
@@ -349,8 +431,8 @@ def calculate_intrinsic_value_dcf(metrics: list, line_items: list, risk_analysis
 
 def estimate_cost_of_equity(beta: float | None) -> float:
     """CAPM: r_e = r_f + β × ERP (use Damodaran's long-term averages)."""
-    risk_free = 0.04          # 10-yr US Treasury proxy
-    erp = 0.05                # long-run US equity risk premium
+    risk_free = 0.04  # 10-yr US Treasury proxy
+    erp = 0.05  # long-run US equity risk premium
     beta = beta if beta is not None else 1.0
     return risk_free + beta * erp
 
@@ -411,6 +493,63 @@ def generate_damodaran_output(
         )
 
     return call_llm(
+        prompt=prompt,
+        pydantic_model=AswathDamodaranSignal,
+        agent_name=agent_id,
+        state=state,
+        default_factory=default_signal,
+    )
+
+
+async def generate_damodaran_output_async(
+    ticker: str,
+    analysis_data: dict[str, any],
+    state: AgentState,
+    agent_id: str,
+) -> AswathDamodaranSignal:
+    """Async version of generate_damodaran_output."""
+
+    template = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """You are Aswath Damodaran, Professor of Finance at NYU Stern.
+                Use your valuation framework to issue trading signals on US equities.
+
+                Speak with your usual clear, data-driven tone:
+                  ◦ Start with the company "story" (qualitatively)
+                  ◦ Connect that story to key numerical drivers: revenue growth, margins, reinvestment, risk
+                  ◦ Conclude with value: your FCFF DCF estimate, margin of safety, and relative valuation sanity checks
+                  ◦ Highlight major uncertainties and how they affect value
+                Return ONLY the JSON specified below.""",
+            ),
+            (
+                "human",
+                """Ticker: {ticker}
+
+                Analysis data:
+                {analysis_data}
+
+                Respond EXACTLY in this JSON schema:
+                {{
+                  "signal": "bullish" | "bearish" | "neutral",
+                  "confidence": float (0-100),
+                  "reasoning": "string"
+                }}""",
+            ),
+        ]
+    )
+
+    prompt = template.invoke({"analysis_data": json.dumps(analysis_data, indent=2), "ticker": ticker})
+
+    def default_signal():
+        return AswathDamodaranSignal(
+            signal="neutral",
+            confidence=0.0,
+            reasoning="Parsing error; defaulting to neutral",
+        )
+
+    return await async_call_llm(
         prompt=prompt,
         pydantic_model=AswathDamodaranSignal,
         agent_name=agent_id,

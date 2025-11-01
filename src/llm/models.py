@@ -1,18 +1,17 @@
-import os
 import json
+import os
+from enum import Enum
+from pathlib import Path
+from typing import List, Tuple
+
 from langchain_anthropic import ChatAnthropic
 from langchain_deepseek import ChatDeepSeek
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
-from langchain_xai import ChatXAI
-from langchain_openai import ChatOpenAI, AzureChatOpenAI
-from langchain_openai import ChatOpenAI
 from langchain_gigachat import GigaChat
+from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
-from enum import Enum
+from langchain_openai import AzureChatOpenAI, ChatOpenAI
+from langchain_xai import ChatXAI
 from pydantic import BaseModel
-from typing import Tuple, List
-from pathlib import Path
 
 
 class ModelProvider(str, Enum):
@@ -76,20 +75,14 @@ class LLMModel(BaseModel):
 # Load models from JSON file
 def load_models_from_json(json_path: str) -> List[LLMModel]:
     """Load models from a JSON file"""
-    with open(json_path, 'r') as f:
+    with open(json_path, "r") as f:
         models_data = json.load(f)
-    
+
     models = []
     for model_data in models_data:
         # Convert string provider to ModelProvider enum
         provider_enum = ModelProvider(model_data["provider"])
-        models.append(
-            LLMModel(
-                display_name=model_data["display_name"],
-                model_name=model_data["model_name"],
-                provider=provider_enum
-            )
-        )
+        models.append(LLMModel(display_name=model_data["display_name"], model_name=model_data["model_name"], provider=provider_enum))
     return models
 
 
@@ -119,14 +112,7 @@ def get_model_info(model_name: str, model_provider: str) -> LLMModel | None:
 
 def get_models_list():
     """Get the list of models for API responses."""
-    return [
-        {
-            "display_name": model.display_name,
-            "model_name": model.model_name,
-            "provider": model.provider.value
-        }
-        for model in AVAILABLE_MODELS
-    ]
+    return [{"display_name": model.display_name, "model_name": model.model_name, "provider": model.provider.value} for model in AVAILABLE_MODELS]
 
 
 def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = None) -> ChatOpenAI | ChatGroq | ChatOllama | GigaChat | None:
@@ -163,7 +149,12 @@ def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = N
         if not api_key:
             print(f"API Key Error: Please make sure GOOGLE_API_KEY is set in your .env file or provided via API keys.")
             raise ValueError("Google API key not found.  Please make sure GOOGLE_API_KEY is set in your .env file or provided via API keys.")
-        return ChatGoogleGenerativeAI(model=model_name, api_key=api_key)
+        # Force REST transport so we avoid gRPC ALTS credential warnings when running off GCP.
+        os.environ.setdefault("GOOGLE_API_USE_REST", "true")
+        os.environ.setdefault("GRPC_VERBOSITY", "NONE")
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        return ChatGoogleGenerativeAI(model=model_name, api_key=api_key, transport="rest")
     elif model_provider == ModelProvider.OLLAMA:
         # For Ollama, we use a base URL instead of an API key
         # Check if OLLAMA_HOST is set (for Docker on macOS)
@@ -178,11 +169,11 @@ def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = N
         if not api_key:
             print(f"API Key Error: Please make sure OPENROUTER_API_KEY is set in your .env file or provided via API keys.")
             raise ValueError("OpenRouter API key not found. Please make sure OPENROUTER_API_KEY is set in your .env file or provided via API keys.")
-        
+
         # Get optional site URL and name for headers
         site_url = os.getenv("YOUR_SITE_URL", "https://github.com/virattt/ai-hedge-fund")
         site_name = os.getenv("YOUR_SITE_NAME", "AI Hedge Fund")
-        
+
         return ChatOpenAI(
             model=model_name,
             openai_api_key=api_key,
@@ -192,7 +183,7 @@ def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = N
                     "HTTP-Referer": site_url,
                     "X-Title": site_name,
                 }
-            }
+            },
         )
     elif model_provider == ModelProvider.XAI:
         api_key = (api_keys or {}).get("XAI_API_KEY") or os.getenv("XAI_API_KEY")
@@ -203,7 +194,7 @@ def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = N
     elif model_provider == ModelProvider.GIGACHAT:
         if os.getenv("GIGACHAT_USER") or os.getenv("GIGACHAT_PASSWORD"):
             return GigaChat(model=model_name)
-        else: 
+        else:
             api_key = (api_keys or {}).get("GIGACHAT_API_KEY") or os.getenv("GIGACHAT_API_KEY") or os.getenv("GIGACHAT_CREDENTIALS")
             if not api_key:
                 print("API Key Error: Please make sure api_keys is set in your .env file or provided via API keys.")
@@ -229,4 +220,24 @@ def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = N
             # Print error to console
             print(f"Azure Deployment Name Error: Please make sure AZURE_OPENAI_DEPLOYMENT_NAME is set in your .env file.")
             raise ValueError("Azure OpenAI deployment name not found.  Please make sure AZURE_OPENAI_DEPLOYMENT_NAME is set in your .env file.")
-        return AzureChatOpenAI(azure_endpoint=azure_endpoint, azure_deployment=azure_deployment_name, api_key=api_key, api_version="2024-10-21")
+        api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+
+        def _env_flag(name: str) -> bool | None:
+            value = os.getenv(name)
+            if value is None:
+                return None
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+
+        use_responses_api = _env_flag("AZURE_OPENAI_USE_RESPONSES_API")
+        if use_responses_api is None:
+            deployment_token = azure_deployment_name.lower()
+            responses_prefixes = ("gpt-5", "gpt-4.1", "gpt-4o", "o4", "o3", "o1")
+            use_responses_api = deployment_token.startswith(responses_prefixes)
+
+        return AzureChatOpenAI(
+            azure_endpoint=azure_endpoint,
+            azure_deployment=azure_deployment_name,
+            api_key=api_key,
+            api_version=api_version,
+            use_responses_api=use_responses_api,
+        )

@@ -1,25 +1,30 @@
+import asyncio
+import json
 import math
 
+import numpy as np
+import pandas as pd
 from langchain_core.messages import HumanMessage
 
+from src.agents.persona_utils import (
+    async_persona_from_observations,
+    persona_from_observations,
+)
 from src.graph.state import AgentState, show_agent_reasoning
+from src.tools.api import get_prices, get_prices_async, prices_to_df
 from src.utils.api_key import get_api_key_from_state
-import json
-import pandas as pd
-import numpy as np
-
-from src.tools.api import get_prices, prices_to_df
+from src.utils.async_state import update_analyst_signals_async
 from src.utils.progress import progress
 
 
 def safe_float(value, default=0.0):
     """
     Safely convert a value to float, handling NaN cases
-    
+
     Args:
         value: The value to convert (can be pandas scalar, numpy value, etc.)
         default: Default value to return if the input is NaN or invalid
-    
+
     Returns:
         float: The converted value or default if NaN/invalid
     """
@@ -29,6 +34,38 @@ def safe_float(value, default=0.0):
         return float(value)
     except (ValueError, TypeError, OverflowError):
         return default
+
+
+def sanitize_confidence(value, default=0.0):
+    """Clamp confidence values to [0, 1] while guarding against NaN/inf."""
+    try:
+        if value is None:
+            return default
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return default
+
+    if math.isnan(confidence) or math.isinf(confidence):
+        return default
+
+    return max(0.0, min(1.0, confidence))
+
+
+def confidence_to_pct(value, default=0.0):
+    """Return an integer percentage representation of a confidence score."""
+    sanitized = sanitize_confidence(value, default)
+    return int(round(sanitized * 100))
+
+
+PERSONA_NAME = "Rhea"
+PERSONA_ROLE = "a chartist persona weaving technical composites into trading guidance"
+PERSONA_BACKSTORY = "Rhea ran a technical macro book and now translates ensemble signals into actionable tilts."
+PERSONA_INSTRUCTIONS = (
+    "Review every component observation and craft the technical stance directly from those inputs.",
+    "Do not rely on predefined rule thresholds; reason from the raw momentum, trend, and volatility evidence.",
+    "Explain the call in first person, referencing the observations that matter most and any conflicts.",
+)
+ALLOWED_SIGNALS = ["bullish", "bearish", "neutral"]
 
 
 ##### Technical Analyst #####
@@ -82,60 +119,72 @@ def technical_analyst_agent(state: AgentState, agent_id: str = "technical_analys
         progress.update_status(agent_id, ticker, "Statistical analysis")
         stat_arb_signals = calculate_stat_arb_signals(prices_df)
 
-        # Combine all signals using a weighted ensemble approach
-        strategy_weights = {
-            "trend": 0.25,
-            "mean_reversion": 0.20,
-            "momentum": 0.25,
-            "volatility": 0.15,
-            "stat_arb": 0.15,
+        components = {
+            "trend_following": {
+                "signal": trend_signals["signal"],
+                "confidence": confidence_to_pct(trend_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(trend_signals["metrics"]),
+            },
+            "mean_reversion": {
+                "signal": mean_reversion_signals["signal"],
+                "confidence": confidence_to_pct(mean_reversion_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(mean_reversion_signals["metrics"]),
+            },
+            "momentum": {
+                "signal": momentum_signals["signal"],
+                "confidence": confidence_to_pct(momentum_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(momentum_signals["metrics"]),
+            },
+            "volatility": {
+                "signal": volatility_signals["signal"],
+                "confidence": confidence_to_pct(volatility_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(volatility_signals["metrics"]),
+            },
+            "statistical_arbitrage": {
+                "signal": stat_arb_signals["signal"],
+                "confidence": confidence_to_pct(stat_arb_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(stat_arb_signals["metrics"]),
+            },
         }
 
-        progress.update_status(agent_id, ticker, "Combining signals")
-        combined_signal = weighted_signal_combination(
-            {
-                "trend": trend_signals,
-                "mean_reversion": mean_reversion_signals,
-                "momentum": momentum_signals,
-                "volatility": volatility_signals,
-                "stat_arb": stat_arb_signals,
+        observations = {
+            "ticker": ticker,
+            "component_signals": components,
+            "price_context": {
+                "latest_close": safe_float(prices_df["close"].iloc[-1]),
+                "lookback_days": int(len(prices_df)),
             },
-            strategy_weights,
+        }
+
+        decision = persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="neutral",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to neutral after missing persona output.",
         )
 
-        # Generate detailed analysis report for this ticker
-        technical_analysis[ticker] = {
-            "signal": combined_signal["signal"],
-            "confidence": round(combined_signal["confidence"] * 100),
-            "reasoning": {
-                "trend_following": {
-                    "signal": trend_signals["signal"],
-                    "confidence": round(trend_signals["confidence"] * 100),
-                    "metrics": normalize_pandas(trend_signals["metrics"]),
-                },
-                "mean_reversion": {
-                    "signal": mean_reversion_signals["signal"],
-                    "confidence": round(mean_reversion_signals["confidence"] * 100),
-                    "metrics": normalize_pandas(mean_reversion_signals["metrics"]),
-                },
-                "momentum": {
-                    "signal": momentum_signals["signal"],
-                    "confidence": round(momentum_signals["confidence"] * 100),
-                    "metrics": normalize_pandas(momentum_signals["metrics"]),
-                },
-                "volatility": {
-                    "signal": volatility_signals["signal"],
-                    "confidence": round(volatility_signals["confidence"] * 100),
-                    "metrics": normalize_pandas(volatility_signals["metrics"]),
-                },
-                "statistical_arbitrage": {
-                    "signal": stat_arb_signals["signal"],
-                    "confidence": round(stat_arb_signals["confidence"] * 100),
-                    "metrics": normalize_pandas(stat_arb_signals["metrics"]),
-                },
+        confidence = int(max(0, min(round(decision.confidence), 100)))
+        constraints = decision.constraints or {}
+        payload = {
+            "signal": decision.signal,
+            "confidence": confidence,
+            "reasoning": decision.reasoning,
+            "constraints": constraints,
+            "components": components,
+            "meta": {
+                "observations": observations,
             },
         }
-        progress.update_status(agent_id, ticker, "Done", analysis=json.dumps(technical_analysis, indent=4))
+
+        technical_analysis[ticker] = payload
+        progress.update_status(agent_id, ticker, "Done", analysis=json.dumps(payload, indent=4))
 
     # Create the technical analyst message
     message = HumanMessage(
@@ -148,6 +197,126 @@ def technical_analyst_agent(state: AgentState, agent_id: str = "technical_analys
 
     # Add the signal to the analyst_signals list
     state["data"]["analyst_signals"][agent_id] = technical_analysis
+
+    progress.update_status(agent_id, None, "Done")
+
+
+async def technical_analyst_agent_async(state: AgentState, agent_id: str = "technical_analyst_agent"):
+    """Async technical analyst leveraging observation personas."""
+    data = state["data"]
+    start_date = data["start_date"]
+    end_date = data["end_date"]
+    tickers = data["tickers"]
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+    technical_analysis = {}
+
+    for ticker in tickers:
+        progress.update_status(agent_id, ticker, "Analyzing price data")
+
+        prices = await get_prices_async(
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            api_key=api_key,
+        )
+
+        if not prices:
+            progress.update_status(agent_id, ticker, "Failed: No price data found")
+            continue
+
+        prices_df = prices_to_df(prices)
+
+        progress.update_status(agent_id, ticker, "Calculating trend signals")
+        trend_signals = calculate_trend_signals(prices_df)
+
+        progress.update_status(agent_id, ticker, "Calculating mean reversion")
+        mean_reversion_signals = calculate_mean_reversion_signals(prices_df)
+
+        progress.update_status(agent_id, ticker, "Calculating momentum")
+        momentum_signals = calculate_momentum_signals(prices_df)
+
+        progress.update_status(agent_id, ticker, "Analyzing volatility")
+        volatility_signals = calculate_volatility_signals(prices_df)
+
+        progress.update_status(agent_id, ticker, "Statistical analysis")
+        stat_arb_signals = calculate_stat_arb_signals(prices_df)
+
+        components = {
+            "trend_following": {
+                "signal": trend_signals["signal"],
+                "confidence": confidence_to_pct(trend_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(trend_signals["metrics"]),
+            },
+            "mean_reversion": {
+                "signal": mean_reversion_signals["signal"],
+                "confidence": confidence_to_pct(mean_reversion_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(mean_reversion_signals["metrics"]),
+            },
+            "momentum": {
+                "signal": momentum_signals["signal"],
+                "confidence": confidence_to_pct(momentum_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(momentum_signals["metrics"]),
+            },
+            "volatility": {
+                "signal": volatility_signals["signal"],
+                "confidence": confidence_to_pct(volatility_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(volatility_signals["metrics"]),
+            },
+            "statistical_arbitrage": {
+                "signal": stat_arb_signals["signal"],
+                "confidence": confidence_to_pct(stat_arb_signals["confidence"], default=0.5),
+                "metrics": normalize_pandas(stat_arb_signals["metrics"]),
+            },
+        }
+
+        observations = {
+            "ticker": ticker,
+            "component_signals": components,
+            "price_context": {
+                "latest_close": safe_float(prices_df["close"].iloc[-1]),
+                "lookback_days": int(len(prices_df)),
+            },
+        }
+
+        decision = await async_persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="neutral",
+            default_confidence=55.0,
+            default_reasoning="Defaulted to neutral after missing persona output.",
+        )
+
+        confidence = int(max(0, min(round(decision.confidence), 100)))
+        constraints = decision.constraints or {}
+        payload = {
+            "signal": decision.signal,
+            "confidence": confidence,
+            "reasoning": decision.reasoning,
+            "constraints": constraints,
+            "components": components,
+            "meta": {
+                "observations": observations,
+            },
+        }
+
+        technical_analysis[ticker] = payload
+        progress.update_status(agent_id, ticker, "Done", analysis=json.dumps(payload, indent=4))
+
+    message = HumanMessage(
+        content=json.dumps(technical_analysis),
+        name=agent_id,
+    )
+
+    if state["metadata"]["show_reasoning"]:
+        show_agent_reasoning(technical_analysis, "Technical Analyst")
+
+    await update_analyst_signals_async(state, agent_id, technical_analysis)
 
     progress.update_status(agent_id, None, "Done")
 
@@ -178,13 +347,13 @@ def calculate_trend_signals(prices_df):
 
     if short_trend.iloc[-1] and medium_trend.iloc[-1]:
         signal = "bullish"
-        confidence = trend_strength
+        confidence = sanitize_confidence(trend_strength)
     elif not short_trend.iloc[-1] and not medium_trend.iloc[-1]:
         signal = "bearish"
-        confidence = trend_strength
+        confidence = sanitize_confidence(trend_strength)
     else:
         signal = "neutral"
-        confidence = 0.5
+        confidence = sanitize_confidence(0.5, default=0.5)
 
     return {
         "signal": signal,
@@ -218,13 +387,13 @@ def calculate_mean_reversion_signals(prices_df):
     # Combine signals
     if z_score.iloc[-1] < -2 and price_vs_bb < 0.2:
         signal = "bullish"
-        confidence = min(abs(z_score.iloc[-1]) / 4, 1.0)
+        confidence = sanitize_confidence(min(abs(z_score.iloc[-1]) / 4, 1.0))
     elif z_score.iloc[-1] > 2 and price_vs_bb > 0.8:
         signal = "bearish"
-        confidence = min(abs(z_score.iloc[-1]) / 4, 1.0)
+        confidence = sanitize_confidence(min(abs(z_score.iloc[-1]) / 4, 1.0))
     else:
         signal = "neutral"
-        confidence = 0.5
+        confidence = sanitize_confidence(0.5, default=0.5)
 
     return {
         "signal": signal,
@@ -263,13 +432,13 @@ def calculate_momentum_signals(prices_df):
 
     if momentum_score > 0.05 and volume_confirmation:
         signal = "bullish"
-        confidence = min(abs(momentum_score) * 5, 1.0)
+        confidence = sanitize_confidence(min(abs(momentum_score) * 5, 1.0))
     elif momentum_score < -0.05 and volume_confirmation:
         signal = "bearish"
-        confidence = min(abs(momentum_score) * 5, 1.0)
+        confidence = sanitize_confidence(min(abs(momentum_score) * 5, 1.0))
     else:
         signal = "neutral"
-        confidence = 0.5
+        confidence = sanitize_confidence(0.5, default=0.5)
 
     return {
         "signal": signal,
@@ -310,13 +479,13 @@ def calculate_volatility_signals(prices_df):
 
     if current_vol_regime < 0.8 and vol_z < -1:
         signal = "bullish"  # Low vol regime, potential for expansion
-        confidence = min(abs(vol_z) / 3, 1.0)
+        confidence = sanitize_confidence(min(abs(vol_z) / 3, 1.0))
     elif current_vol_regime > 1.2 and vol_z > 1:
         signal = "bearish"  # High vol regime, potential for contraction
-        confidence = min(abs(vol_z) / 3, 1.0)
+        confidence = sanitize_confidence(min(abs(vol_z) / 3, 1.0))
     else:
         signal = "neutral"
-        confidence = 0.5
+        confidence = sanitize_confidence(0.5, default=0.5)
 
     return {
         "signal": signal,
@@ -350,13 +519,13 @@ def calculate_stat_arb_signals(prices_df):
     # Generate signal based on statistical properties
     if hurst < 0.4 and skew.iloc[-1] > 1:
         signal = "bullish"
-        confidence = (0.5 - hurst) * 2
+        confidence = sanitize_confidence((0.5 - hurst) * 2)
     elif hurst < 0.4 and skew.iloc[-1] < -1:
         signal = "bearish"
-        confidence = (0.5 - hurst) * 2
+        confidence = sanitize_confidence((0.5 - hurst) * 2)
     else:
         signal = "neutral"
-        confidence = 0.5
+        confidence = sanitize_confidence(0.5, default=0.5)
 
     return {
         "signal": signal,
@@ -367,41 +536,6 @@ def calculate_stat_arb_signals(prices_df):
             "kurtosis": safe_float(kurt.iloc[-1]),
         },
     }
-
-
-def weighted_signal_combination(signals, weights):
-    """
-    Combines multiple trading signals using a weighted approach
-    """
-    # Convert signals to numeric values
-    signal_values = {"bullish": 1, "neutral": 0, "bearish": -1}
-
-    weighted_sum = 0
-    total_confidence = 0
-
-    for strategy, signal in signals.items():
-        numeric_signal = signal_values[signal["signal"]]
-        weight = weights[strategy]
-        confidence = signal["confidence"]
-
-        weighted_sum += numeric_signal * weight * confidence
-        total_confidence += weight * confidence
-
-    # Normalize the weighted sum
-    if total_confidence > 0:
-        final_score = weighted_sum / total_confidence
-    else:
-        final_score = 0
-
-    # Convert back to signal
-    if final_score > 0.2:
-        signal = "bullish"
-    elif final_score < -0.2:
-        signal = "bearish"
-    else:
-        signal = "neutral"
-
-    return {"signal": signal, "confidence": abs(final_score)}
 
 
 def normalize_pandas(obj):

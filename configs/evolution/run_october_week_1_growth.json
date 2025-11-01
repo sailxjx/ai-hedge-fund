@@ -1,0 +1,23 @@
+{
+  "generation_id": "gen-001",
+  "arena_run_id": "arena-oct24",
+  "model_provider": "azure",
+  "prompt_revision": "baseline_v1",
+  "diversity_guard": true,
+  "analyst_overlap_threshold": 0.8,
+  "weight_similarity_threshold": 0.9,
+  "genome_registry_path": "log/genomes",
+  "log_dir": "log/arena/gen-001",
+  "experiments": [
+    {
+      "label": "october_week_1_growth",
+      "tickers": ["TSLA", "NVDA", "GOOGL"],
+      "start_date": "2024-10-01",
+      "end_date": "2024-10-07",
+      "analysts_all": false,
+      "analysts": ["cathie_wood", "peter_lynch", "growth_momentum"],
+      "genome_id": "genome_growth_v1",
+      "note": "rerun to capture ledger entry"
+    }
+  ]
+}

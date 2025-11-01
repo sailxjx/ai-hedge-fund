@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Dict, Mapping
 from types import MappingProxyType
+from typing import Dict, Mapping
 
-from .types import PortfolioSnapshot, PositionState, TickerRealizedGains
+from .data_types import PortfolioSnapshot, PositionState, TickerRealizedGains
 
 
 class Portfolio:
@@ -20,6 +20,7 @@ class Portfolio:
         tickers: list[str],
         initial_cash: float,
         margin_requirement: float,
+        initial_snapshot: PortfolioSnapshot | None = None,
     ) -> None:
         self._portfolio: PortfolioSnapshot = {
             "cash": float(initial_cash),
@@ -35,11 +36,57 @@ class Portfolio:
                 }
                 for ticker in tickers
             },
-            "realized_gains": {
-                ticker: {"long": 0.0, "short": 0.0}
-                for ticker in tickers
-            },
+            "realized_gains": {ticker: {"long": 0.0, "short": 0.0} for ticker in tickers},
         }
+        if initial_snapshot is not None:
+            self._apply_snapshot(initial_snapshot)
+
+    def _apply_snapshot(self, snapshot: PortfolioSnapshot) -> None:
+        """Load an existing portfolio snapshot into the live state."""
+        cash = snapshot.get("cash")
+        if cash is not None:
+            self._portfolio["cash"] = float(cash)
+        margin_req = snapshot.get("margin_requirement")
+        if margin_req is not None:
+            self._portfolio["margin_requirement"] = float(margin_req)
+        margin_used = snapshot.get("margin_used")
+        if margin_used is not None:
+            self._portfolio["margin_used"] = float(margin_used)
+
+        positions = snapshot.get("positions", {})
+        for ticker, state in positions.items():
+            if ticker not in self._portfolio["positions"]:
+                self._portfolio["positions"][ticker] = {
+                    "long": 0,
+                    "short": 0,
+                    "long_cost_basis": 0.0,
+                    "short_cost_basis": 0.0,
+                    "short_margin_used": 0.0,
+                }
+                self._portfolio["realized_gains"].setdefault(ticker, {"long": 0.0, "short": 0.0})
+            position = self._portfolio["positions"][ticker]
+            position["long"] = int(state.get("long", position["long"]))
+            position["short"] = int(state.get("short", position["short"]))
+            position["long_cost_basis"] = float(state.get("long_cost_basis", position["long_cost_basis"]))
+            position["short_cost_basis"] = float(state.get("short_cost_basis", position["short_cost_basis"]))
+            position["short_margin_used"] = float(state.get("short_margin_used", position["short_margin_used"]))
+
+        realized_gains = snapshot.get("realized_gains", {})
+        for ticker, gains in realized_gains.items():
+            if ticker not in self._portfolio["realized_gains"]:
+                self._portfolio["realized_gains"][ticker] = {"long": 0.0, "short": 0.0}
+                self._portfolio["positions"].setdefault(
+                    ticker,
+                    {
+                        "long": 0,
+                        "short": 0,
+                        "long_cost_basis": 0.0,
+                        "short_cost_basis": 0.0,
+                        "short_margin_used": 0.0,
+                    },
+                )
+            self._portfolio["realized_gains"][ticker]["long"] = float(gains.get("long", 0.0))
+            self._portfolio["realized_gains"][ticker]["short"] = float(gains.get("short", 0.0))
 
     def get_snapshot(self) -> PortfolioSnapshot:
         positions_copy: Dict[str, PositionState] = {
@@ -52,10 +99,7 @@ class Portfolio:
             }
             for t, p in self._portfolio["positions"].items()
         }
-        gains_copy: Dict[str, TickerRealizedGains] = {
-            t: {"long": g["long"], "short": g["short"]}
-            for t, g in self._portfolio["realized_gains"].items()
-        }
+        gains_copy: Dict[str, TickerRealizedGains] = {t: {"long": g["long"], "short": g["short"]} for t, g in self._portfolio["realized_gains"].items()}
         return {
             "cash": float(self._portfolio["cash"]),
             "margin_used": float(self._portfolio["margin_used"]),
@@ -189,4 +233,3 @@ class Portfolio:
             position["short_cost_basis"] = 0.0
             position["short_margin_used"] = 0.0
         return quantity
-

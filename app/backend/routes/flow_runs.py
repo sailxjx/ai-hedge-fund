@@ -1,18 +1,19 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
-from sqlalchemy.orm import Session
 from typing import List, Optional
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
 from app.backend.database import get_db
-from app.backend.repositories.flow_run_repository import FlowRunRepository
-from app.backend.repositories.flow_repository import FlowRepository
 from app.backend.models.schemas import (
+    ErrorResponse,
     FlowRunCreateRequest,
-    FlowRunUpdateRequest,
     FlowRunResponse,
-    FlowRunSummaryResponse,
     FlowRunStatus,
-    ErrorResponse
+    FlowRunSummaryResponse,
+    FlowRunUpdateRequest,
 )
+from app.backend.repositories.flow_repository import FlowRepository
+from app.backend.repositories.flow_run_repository import FlowRunRepository
 
 router = APIRouter(prefix="/flows/{flow_id}/runs", tags=["flow-runs"])
 
@@ -25,11 +26,7 @@ router = APIRouter(prefix="/flows/{flow_id}/runs", tags=["flow-runs"])
         500: {"model": ErrorResponse, "description": "Internal server error"},
     },
 )
-async def create_flow_run(
-    flow_id: int, 
-    request: FlowRunCreateRequest, 
-    db: Session = Depends(get_db)
-):
+async def create_flow_run(flow_id: int, request: FlowRunCreateRequest, db: Session = Depends(get_db)):
     """Create a new flow run for the specified flow"""
     try:
         # Verify flow exists
@@ -37,13 +34,10 @@ async def create_flow_run(
         flow = flow_repo.get_flow_by_id(flow_id)
         if not flow:
             raise HTTPException(status_code=404, detail="Flow not found")
-        
+
         # Create the flow run
         run_repo = FlowRunRepository(db)
-        flow_run = run_repo.create_flow_run(
-            flow_id=flow_id,
-            request_data=request.request_data
-        )
+        flow_run = run_repo.create_flow_run(flow_id=flow_id, request_data=request.request_data)
         return FlowRunResponse.from_orm(flow_run)
     except HTTPException:
         raise
@@ -59,12 +53,7 @@ async def create_flow_run(
         500: {"model": ErrorResponse, "description": "Internal server error"},
     },
 )
-async def get_flow_runs(
-    flow_id: int,
-    limit: int = Query(50, ge=1, le=100, description="Maximum number of runs to return"),
-    offset: int = Query(0, ge=0, description="Number of runs to skip"),
-    db: Session = Depends(get_db)
-):
+async def get_flow_runs(flow_id: int, limit: int = Query(50, ge=1, le=100, description="Maximum number of runs to return"), offset: int = Query(0, ge=0, description="Number of runs to skip"), db: Session = Depends(get_db)):
     """Get all runs for the specified flow"""
     try:
         # Verify flow exists
@@ -72,7 +61,7 @@ async def get_flow_runs(
         flow = flow_repo.get_flow_by_id(flow_id)
         if not flow:
             raise HTTPException(status_code=404, detail="Flow not found")
-        
+
         # Get flow runs
         run_repo = FlowRunRepository(db)
         flow_runs = run_repo.get_flow_runs_by_flow_id(flow_id, limit=limit, offset=offset)
@@ -99,7 +88,7 @@ async def get_active_flow_run(flow_id: int, db: Session = Depends(get_db)):
         flow = flow_repo.get_flow_by_id(flow_id)
         if not flow:
             raise HTTPException(status_code=404, detail="Flow not found")
-        
+
         # Get active flow run
         run_repo = FlowRunRepository(db)
         active_run = run_repo.get_active_flow_run(flow_id)
@@ -126,7 +115,7 @@ async def get_latest_flow_run(flow_id: int, db: Session = Depends(get_db)):
         flow = flow_repo.get_flow_by_id(flow_id)
         if not flow:
             raise HTTPException(status_code=404, detail="Flow not found")
-        
+
         # Get latest flow run
         run_repo = FlowRunRepository(db)
         latest_run = run_repo.get_latest_flow_run(flow_id)
@@ -153,13 +142,13 @@ async def get_flow_run(flow_id: int, run_id: int, db: Session = Depends(get_db))
         flow = flow_repo.get_flow_by_id(flow_id)
         if not flow:
             raise HTTPException(status_code=404, detail="Flow not found")
-        
+
         # Get flow run
         run_repo = FlowRunRepository(db)
         flow_run = run_repo.get_flow_run_by_id(run_id)
         if not flow_run or flow_run.flow_id != flow_id:
             raise HTTPException(status_code=404, detail="Flow run not found")
-        
+
         return FlowRunResponse.from_orm(flow_run)
     except HTTPException:
         raise
@@ -175,12 +164,7 @@ async def get_flow_run(flow_id: int, run_id: int, db: Session = Depends(get_db))
         500: {"model": ErrorResponse, "description": "Internal server error"},
     },
 )
-async def update_flow_run(
-    flow_id: int, 
-    run_id: int, 
-    request: FlowRunUpdateRequest, 
-    db: Session = Depends(get_db)
-):
+async def update_flow_run(flow_id: int, run_id: int, request: FlowRunUpdateRequest, db: Session = Depends(get_db)):
     """Update an existing flow run"""
     try:
         # Verify flow exists
@@ -188,24 +172,19 @@ async def update_flow_run(
         flow = flow_repo.get_flow_by_id(flow_id)
         if not flow:
             raise HTTPException(status_code=404, detail="Flow not found")
-        
+
         # Update flow run
         run_repo = FlowRunRepository(db)
         # First verify the run exists and belongs to this flow
         existing_run = run_repo.get_flow_run_by_id(run_id)
         if not existing_run or existing_run.flow_id != flow_id:
             raise HTTPException(status_code=404, detail="Flow run not found")
-        
-        flow_run = run_repo.update_flow_run(
-            run_id=run_id,
-            status=request.status,
-            results=request.results,
-            error_message=request.error_message
-        )
-        
+
+        flow_run = run_repo.update_flow_run(run_id=run_id, status=request.status, results=request.results, error_message=request.error_message)
+
         if not flow_run:
             raise HTTPException(status_code=404, detail="Flow run not found")
-        
+
         return FlowRunResponse.from_orm(flow_run)
     except HTTPException:
         raise
@@ -229,17 +208,17 @@ async def delete_flow_run(flow_id: int, run_id: int, db: Session = Depends(get_d
         flow = flow_repo.get_flow_by_id(flow_id)
         if not flow:
             raise HTTPException(status_code=404, detail="Flow not found")
-        
+
         # Verify run exists and belongs to this flow
         run_repo = FlowRunRepository(db)
         existing_run = run_repo.get_flow_run_by_id(run_id)
         if not existing_run or existing_run.flow_id != flow_id:
             raise HTTPException(status_code=404, detail="Flow run not found")
-        
+
         success = run_repo.delete_flow_run(run_id)
         if not success:
             raise HTTPException(status_code=404, detail="Flow run not found")
-        
+
         return {"message": "Flow run deleted successfully"}
     except HTTPException:
         raise
@@ -263,11 +242,11 @@ async def delete_all_flow_runs(flow_id: int, db: Session = Depends(get_db)):
         flow = flow_repo.get_flow_by_id(flow_id)
         if not flow:
             raise HTTPException(status_code=404, detail="Flow not found")
-        
+
         # Delete all flow runs
         run_repo = FlowRunRepository(db)
         deleted_count = run_repo.delete_flow_runs_by_flow_id(flow_id)
-        
+
         return {"message": f"Deleted {deleted_count} flow runs successfully"}
     except HTTPException:
         raise
@@ -291,13 +270,13 @@ async def get_flow_run_count(flow_id: int, db: Session = Depends(get_db)):
         flow = flow_repo.get_flow_by_id(flow_id)
         if not flow:
             raise HTTPException(status_code=404, detail="Flow not found")
-        
+
         # Get run count
         run_repo = FlowRunRepository(db)
         count = run_repo.get_flow_run_count(flow_id)
-        
+
         return {"flow_id": flow_id, "total_runs": count}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get flow run count: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Failed to get flow run count: {str(e)}")

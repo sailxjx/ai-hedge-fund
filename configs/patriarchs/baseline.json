@@ -1,0 +1,10 @@
+{
+  "patriarch_id": "baseline",
+  "label": "Baseline Patriarch",
+  "prompt_path": "configs/patriarchs/prompts/baseline.txt",
+  "aggregation_mode": "weighted_majority",
+  "overrides_policy": "respect_guardrails",
+  "metadata": {
+    "notes": "Initial meta-agent; refine aggregation heuristics via arena tuning."
+  }
+}

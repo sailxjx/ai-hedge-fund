@@ -1,13 +1,23 @@
-from src.graph.state import AgentState, show_agent_reasoning
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage
-from pydantic import BaseModel, Field
 import json
+
+from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
 from typing_extensions import Literal
-from src.tools.api import get_financial_metrics, get_market_cap, search_line_items
-from src.utils.llm import call_llm
-from src.utils.progress import progress
+
+from src.graph.state import AgentState, show_agent_reasoning
+from src.tools.api import (
+    get_financial_metrics,
+    get_financial_metrics_async,
+    get_market_cap,
+    get_market_cap_async,
+    search_line_items,
+    search_line_items_async,
+)
 from src.utils.api_key import get_api_key_from_state
+from src.utils.async_state import update_analyst_signals_async
+from src.utils.llm import async_call_llm, call_llm
+from src.utils.progress import progress
 
 
 class WarrenBuffettSignal(BaseModel):
@@ -81,23 +91,10 @@ def warren_buffett_agent(state: AgentState, agent_id: str = "warren_buffett_agen
         intrinsic_value_analysis = calculate_intrinsic_value(financial_line_items)
 
         # Calculate total score without circle of competence (LLM will handle that)
-        total_score = (
-                fundamental_analysis["score"] +
-                consistency_analysis["score"] +
-                moat_analysis["score"] +
-                mgmt_analysis["score"] +
-                pricing_power_analysis["score"] +
-                book_value_analysis["score"]
-        )
+        total_score = fundamental_analysis["score"] + consistency_analysis["score"] + moat_analysis["score"] + mgmt_analysis["score"] + pricing_power_analysis["score"] + book_value_analysis["score"]
 
         # Update max possible score calculation
-        max_possible_score = (
-                10 +  # fundamental_analysis (ROE, debt, margins, current ratio)
-                moat_analysis["max_score"] +
-                mgmt_analysis["max_score"] +
-                5 +  # pricing_power (0-5)
-                5  # book_value_growth (0-5)
-        )
+        max_possible_score = 10 + moat_analysis["max_score"] + mgmt_analysis["max_score"] + 5 + 5  # fundamental_analysis (ROE, debt, margins, current ratio)  # pricing_power (0-5)  # book_value_growth (0-5)
 
         # Add margin of safety analysis if we have both intrinsic value and current price
         margin_of_safety = None
@@ -147,6 +144,119 @@ def warren_buffett_agent(state: AgentState, agent_id: str = "warren_buffett_agen
 
     # Add the signal to the analyst_signals list
     state["data"]["analyst_signals"][agent_id] = buffett_analysis
+
+    progress.update_status(agent_id, None, "Done")
+
+    return {"messages": [message], "data": state["data"]}
+
+
+async def warren_buffett_agent_async(state: AgentState, agent_id: str = "warren_buffett_agent"):
+    """Async variant of the Warren Buffett agent for persona parallelism."""
+
+    data = state["data"]
+    end_date = data["end_date"]
+    tickers = data["tickers"]
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+    analysis_data = {}
+    buffett_analysis = {}
+
+    for ticker in tickers:
+        progress.update_status(agent_id, ticker, "Fetching financial metrics")
+        metrics = await get_financial_metrics_async(ticker, end_date, period="ttm", limit=10, api_key=api_key)
+
+        progress.update_status(agent_id, ticker, "Gathering financial line items")
+        financial_line_items = await search_line_items_async(
+            ticker,
+            [
+                "capital_expenditure",
+                "depreciation_and_amortization",
+                "net_income",
+                "outstanding_shares",
+                "total_assets",
+                "total_liabilities",
+                "shareholders_equity",
+                "dividends_and_other_cash_distributions",
+                "issuance_or_purchase_of_equity_shares",
+                "gross_profit",
+                "revenue",
+                "free_cash_flow",
+            ],
+            end_date,
+            period="ttm",
+            limit=10,
+            api_key=api_key,
+        )
+
+        progress.update_status(agent_id, ticker, "Getting market cap")
+        market_cap = await get_market_cap_async(ticker, end_date, api_key=api_key)
+
+        progress.update_status(agent_id, ticker, "Analyzing fundamentals")
+        fundamental_analysis = analyze_fundamentals(metrics)
+
+        progress.update_status(agent_id, ticker, "Analyzing consistency")
+        consistency_analysis = analyze_consistency(financial_line_items)
+
+        progress.update_status(agent_id, ticker, "Analyzing competitive moat")
+        moat_analysis = analyze_moat(metrics)
+
+        progress.update_status(agent_id, ticker, "Analyzing pricing power")
+        pricing_power_analysis = analyze_pricing_power(financial_line_items, metrics)
+
+        progress.update_status(agent_id, ticker, "Analyzing book value growth")
+        book_value_analysis = analyze_book_value_growth(financial_line_items)
+
+        progress.update_status(agent_id, ticker, "Analyzing management quality")
+        mgmt_analysis = analyze_management_quality(financial_line_items)
+
+        progress.update_status(agent_id, ticker, "Calculating intrinsic value")
+        intrinsic_value_analysis = calculate_intrinsic_value(financial_line_items)
+
+        total_score = fundamental_analysis["score"] + consistency_analysis["score"] + moat_analysis["score"] + mgmt_analysis["score"] + pricing_power_analysis["score"] + book_value_analysis["score"]
+
+        max_possible_score = 10 + moat_analysis["max_score"] + mgmt_analysis["max_score"] + 5 + 5
+
+        margin_of_safety = None
+        intrinsic_value = intrinsic_value_analysis["intrinsic_value"]
+        if intrinsic_value and market_cap:
+            margin_of_safety = (intrinsic_value - market_cap) / market_cap
+
+        analysis_data[ticker] = {
+            "ticker": ticker,
+            "score": total_score,
+            "max_score": max_possible_score,
+            "fundamental_analysis": fundamental_analysis,
+            "consistency_analysis": consistency_analysis,
+            "moat_analysis": moat_analysis,
+            "pricing_power_analysis": pricing_power_analysis,
+            "book_value_analysis": book_value_analysis,
+            "management_analysis": mgmt_analysis,
+            "intrinsic_value_analysis": intrinsic_value_analysis,
+            "market_cap": market_cap,
+            "margin_of_safety": margin_of_safety,
+        }
+
+        progress.update_status(agent_id, ticker, "Generating Warren Buffett analysis")
+        buffett_output = await generate_buffett_output_async(
+            ticker=ticker,
+            analysis_data=analysis_data[ticker],
+            state=state,
+            agent_id=agent_id,
+        )
+
+        buffett_analysis[ticker] = {
+            "signal": buffett_output.signal,
+            "confidence": buffett_output.confidence,
+            "reasoning": buffett_output.reasoning,
+        }
+
+        progress.update_status(agent_id, ticker, "Done", analysis=buffett_output.reasoning)
+
+    message = HumanMessage(content=json.dumps(buffett_analysis), name=agent_id)
+
+    if state["metadata"]["show_reasoning"]:
+        show_agent_reasoning(buffett_analysis, agent_id)
+
+    await update_analyst_signals_async(state, agent_id, buffett_analysis)
 
     progress.update_status(agent_id, None, "Done")
 
@@ -254,8 +364,7 @@ def analyze_moat(metrics: list) -> dict[str, any]:
 
     # 1. Return on Capital Consistency (Buffett's favorite moat indicator)
     historical_roes = [m.return_on_equity for m in metrics if m.return_on_equity is not None]
-    historical_roics = [m.return_on_invested_capital for m in metrics if
-                        hasattr(m, 'return_on_invested_capital') and m.return_on_invested_capital is not None]
+    historical_roics = [m.return_on_invested_capital for m in metrics if hasattr(m, "return_on_invested_capital") and m.return_on_invested_capital is not None]
 
     if len(historical_roes) >= 5:
         # Check for consistently high ROE (>15% for most periods)
@@ -265,8 +374,7 @@ def analyze_moat(metrics: list) -> dict[str, any]:
         if roe_consistency >= 0.8:  # 80%+ of periods with ROE > 15%
             moat_score += 2
             avg_roe = sum(historical_roes) / len(historical_roes)
-            reasoning.append(
-                f"Excellent ROE consistency: {high_roe_periods}/{len(historical_roes)} periods >15% (avg: {avg_roe:.1%}) - indicates durable competitive advantage")
+            reasoning.append(f"Excellent ROE consistency: {high_roe_periods}/{len(historical_roes)} periods >15% (avg: {avg_roe:.1%}) - indicates durable competitive advantage")
         elif roe_consistency >= 0.6:
             moat_score += 1
             reasoning.append(f"Good ROE performance: {high_roe_periods}/{len(historical_roes)} periods >15%")
@@ -299,7 +407,7 @@ def analyze_moat(metrics: list) -> dict[str, any]:
         # Check asset turnover trends (revenue efficiency)
         asset_turnovers = []
         for m in metrics:
-            if hasattr(m, 'asset_turnover') and m.asset_turnover is not None:
+            if hasattr(m, "asset_turnover") and m.asset_turnover is not None:
                 asset_turnovers.append(m.asset_turnover)
 
         if len(asset_turnovers) >= 3:
@@ -312,11 +420,11 @@ def analyze_moat(metrics: list) -> dict[str, any]:
         # Calculate coefficient of variation (stability measure)
         roe_avg = sum(historical_roes) / len(historical_roes)
         roe_variance = sum((roe - roe_avg) ** 2 for roe in historical_roes) / len(historical_roes)
-        roe_stability = 1 - (roe_variance ** 0.5) / roe_avg if roe_avg > 0 else 0
+        roe_stability = 1 - (roe_variance**0.5) / roe_avg if roe_avg > 0 else 0
 
         margin_avg = sum(historical_margins) / len(historical_margins)
         margin_variance = sum((margin - margin_avg) ** 2 for margin in historical_margins) / len(historical_margins)
-        margin_stability = 1 - (margin_variance ** 0.5) / margin_avg if margin_avg > 0 else 0
+        margin_stability = 1 - (margin_variance**0.5) / margin_avg if margin_avg > 0 else 0
 
         overall_stability = (roe_stability + margin_stability) / 2
 
@@ -349,22 +457,19 @@ def analyze_management_quality(financial_line_items: list) -> dict[str, any]:
     mgmt_score = 0
 
     latest = financial_line_items[0]
-    if hasattr(latest,
-               "issuance_or_purchase_of_equity_shares") and latest.issuance_or_purchase_of_equity_shares and latest.issuance_or_purchase_of_equity_shares < 0:
+    if hasattr(latest, "issuance_or_purchase_of_equity_shares") and latest.issuance_or_purchase_of_equity_shares and latest.issuance_or_purchase_of_equity_shares < 0:
         # Negative means the company spent money on buybacks
         mgmt_score += 1
         reasoning.append("Company has been repurchasing shares (shareholder-friendly)")
 
-    if hasattr(latest,
-               "issuance_or_purchase_of_equity_shares") and latest.issuance_or_purchase_of_equity_shares and latest.issuance_or_purchase_of_equity_shares > 0:
+    if hasattr(latest, "issuance_or_purchase_of_equity_shares") and latest.issuance_or_purchase_of_equity_shares and latest.issuance_or_purchase_of_equity_shares > 0:
         # Positive issuance means new shares => possible dilution
         reasoning.append("Recent common stock issuance (potential dilution)")
     else:
         reasoning.append("No significant new stock issuance detected")
 
     # Check for any dividends
-    if hasattr(latest,
-               "dividends_and_other_cash_distributions") and latest.dividends_and_other_cash_distributions and latest.dividends_and_other_cash_distributions < 0:
+    if hasattr(latest, "dividends_and_other_cash_distributions") and latest.dividends_and_other_cash_distributions and latest.dividends_and_other_cash_distributions < 0:
         mgmt_score += 1
         reasoning.append("Company has a track record of paying dividends")
     else:
@@ -396,9 +501,12 @@ def calculate_owner_earnings(financial_line_items: list) -> dict[str, any]:
 
     if not all([net_income is not None, depreciation is not None, capex is not None]):
         missing = []
-        if net_income is None: missing.append("net income")
-        if depreciation is None: missing.append("depreciation")
-        if capex is None: missing.append("capital expenditure")
+        if net_income is None:
+            missing.append("net income")
+        if depreciation is None:
+            missing.append("depreciation")
+        if capex is None:
+            missing.append("capital expenditure")
         return {"owner_earnings": None, "details": [f"Missing components: {', '.join(missing)}"]}
 
     # Enhanced maintenance capex estimation using historical analysis
@@ -408,12 +516,12 @@ def calculate_owner_earnings(financial_line_items: list) -> dict[str, any]:
     working_capital_change = 0
     if len(financial_line_items) >= 2:
         try:
-            current_assets_current = getattr(latest, 'current_assets', None)
-            current_liab_current = getattr(latest, 'current_liabilities', None)
+            current_assets_current = getattr(latest, "current_assets", None)
+            current_liab_current = getattr(latest, "current_liabilities", None)
 
             previous = financial_line_items[1]
-            current_assets_previous = getattr(previous, 'current_assets', None)
-            current_liab_previous = getattr(previous, 'current_liabilities', None)
+            current_assets_previous = getattr(previous, "current_assets", None)
+            current_liab_previous = getattr(previous, "current_liabilities", None)
 
             if all([current_assets_current, current_liab_current, current_assets_previous, current_liab_previous]):
                 wc_current = current_assets_current - current_liab_current
@@ -433,22 +541,11 @@ def calculate_owner_earnings(financial_line_items: list) -> dict[str, any]:
     if maintenance_capex > depreciation * 2:  # Maintenance capex shouldn't typically exceed 2x depreciation
         details.append("Warning: Estimated maintenance capex seems high relative to depreciation")
 
-    details.extend([
-        f"Net income: ${net_income:,.0f}",
-        f"Depreciation: ${depreciation:,.0f}",
-        f"Estimated maintenance capex: ${maintenance_capex:,.0f}",
-        f"Owner earnings: ${owner_earnings:,.0f}"
-    ])
+    details.extend([f"Net income: ${net_income:,.0f}", f"Depreciation: ${depreciation:,.0f}", f"Estimated maintenance capex: ${maintenance_capex:,.0f}", f"Owner earnings: ${owner_earnings:,.0f}"])
 
     return {
         "owner_earnings": owner_earnings,
-        "components": {
-            "net_income": net_income,
-            "depreciation": depreciation,
-            "maintenance_capex": maintenance_capex,
-            "working_capital_change": working_capital_change,
-            "total_capex": abs(capex) if capex else 0
-        },
+        "components": {"net_income": net_income, "depreciation": depreciation, "maintenance_capex": maintenance_capex, "working_capital_change": working_capital_change, "total_capex": abs(capex) if capex else 0},
         "details": details,
     }
 
@@ -466,21 +563,19 @@ def estimate_maintenance_capex(financial_line_items: list) -> float:
     depreciation_values = []
 
     for item in financial_line_items[:5]:  # Last 5 periods
-        if hasattr(item, 'capital_expenditure') and hasattr(item, 'revenue'):
+        if hasattr(item, "capital_expenditure") and hasattr(item, "revenue"):
             if item.capital_expenditure and item.revenue and item.revenue > 0:
                 capex_ratio = abs(item.capital_expenditure) / item.revenue
                 capex_ratios.append(capex_ratio)
 
-        if hasattr(item, 'depreciation_and_amortization') and item.depreciation_and_amortization:
+        if hasattr(item, "depreciation_and_amortization") and item.depreciation_and_amortization:
             depreciation_values.append(item.depreciation_and_amortization)
 
     # Approach 2: Percentage of depreciation (typically 80-120% for maintenance)
-    latest_depreciation = financial_line_items[0].depreciation_and_amortization if financial_line_items[
-        0].depreciation_and_amortization else 0
+    latest_depreciation = financial_line_items[0].depreciation_and_amortization if financial_line_items[0].depreciation_and_amortization else 0
 
     # Approach 3: Industry-specific heuristics
-    latest_capex = abs(financial_line_items[0].capital_expenditure) if financial_line_items[
-        0].capital_expenditure else 0
+    latest_capex = abs(financial_line_items[0].capital_expenditure) if financial_line_items[0].capital_expenditure else 0
 
     # Conservative estimate: Use the higher of:
     # 1. 85% of total capex (assuming 15% is growth capex)
@@ -493,8 +588,7 @@ def estimate_maintenance_capex(financial_line_items: list) -> float:
     # If we have historical data, use average capex ratio
     if len(capex_ratios) >= 3:
         avg_capex_ratio = sum(capex_ratios) / len(capex_ratios)
-        latest_revenue = financial_line_items[0].revenue if hasattr(financial_line_items[0], 'revenue') and \
-                                                            financial_line_items[0].revenue else 0
+        latest_revenue = financial_line_items[0].revenue if hasattr(financial_line_items[0], "revenue") and financial_line_items[0].revenue else 0
         method_3 = avg_capex_ratio * latest_revenue if latest_revenue else 0
 
         # Use the median of the three approaches for conservatism
@@ -531,7 +625,7 @@ def calculate_intrinsic_value(financial_line_items: list) -> dict[str, any]:
     # Estimate growth rate based on historical performance (more conservative)
     historical_earnings = []
     for item in financial_line_items[:5]:  # Last 5 years
-        if hasattr(item, 'net_income') and item.net_income:
+        if hasattr(item, "net_income") and item.net_income:
             historical_earnings.append(item.net_income)
 
     # Calculate historical growth rate
@@ -567,8 +661,7 @@ def calculate_intrinsic_value(financial_line_items: list) -> dict[str, any]:
     stage2_years = 5  # Transition phase
 
     present_value = 0
-    details.append(
-        f"Using three-stage DCF: Stage 1 ({stage1_growth:.1%}, {stage1_years}y), Stage 2 ({stage2_growth:.1%}, {stage2_years}y), Terminal ({terminal_growth:.1%})")
+    details.append(f"Using three-stage DCF: Stage 1 ({stage1_growth:.1%}, {stage1_years}y), Stage 2 ({stage2_growth:.1%}, {stage2_years}y), Terminal ({terminal_growth:.1%})")
 
     # Stage 1: Higher growth
     stage1_pv = 0
@@ -597,15 +690,7 @@ def calculate_intrinsic_value(financial_line_items: list) -> dict[str, any]:
     # Apply additional margin of safety (Buffett's conservatism)
     conservative_intrinsic_value = intrinsic_value * 0.85  # 15% additional haircut
 
-    details.extend([
-        f"Stage 1 PV: ${stage1_pv:,.0f}",
-        f"Stage 2 PV: ${stage2_pv:,.0f}",
-        f"Terminal PV: ${terminal_pv:,.0f}",
-        f"Total IV: ${intrinsic_value:,.0f}",
-        f"Conservative IV (15% haircut): ${conservative_intrinsic_value:,.0f}",
-        f"Owner earnings: ${owner_earnings:,.0f}",
-        f"Discount rate: {discount_rate:.1%}"
-    ])
+    details.extend([f"Stage 1 PV: ${stage1_pv:,.0f}", f"Stage 2 PV: ${stage2_pv:,.0f}", f"Terminal PV: ${terminal_pv:,.0f}", f"Total IV: ${intrinsic_value:,.0f}", f"Conservative IV (15% haircut): ${conservative_intrinsic_value:,.0f}", f"Owner earnings: ${owner_earnings:,.0f}", f"Discount rate: {discount_rate:.1%}"])
 
     return {
         "intrinsic_value": conservative_intrinsic_value,
@@ -618,7 +703,7 @@ def calculate_intrinsic_value(financial_line_items: list) -> dict[str, any]:
             "discount_rate": discount_rate,
             "stage1_years": stage1_years,
             "stage2_years": stage2_years,
-            "historical_growth": conservative_growth if 'conservative_growth' in locals() else None,
+            "historical_growth": conservative_growth if "conservative_growth" in locals() else None,
         },
         "details": details,
     }
@@ -630,12 +715,7 @@ def analyze_book_value_growth(financial_line_items: list) -> dict[str, any]:
         return {"score": 0, "details": "Insufficient data for book value analysis"}
 
     # Extract book values per share
-    book_values = [
-        item.shareholders_equity / item.outstanding_shares
-        for item in financial_line_items
-        if hasattr(item, 'shareholders_equity') and hasattr(item, 'outstanding_shares')
-        and item.shareholders_equity and item.outstanding_shares
-    ]
+    book_values = [item.shareholders_equity / item.outstanding_shares for item in financial_line_items if hasattr(item, "shareholders_equity") and hasattr(item, "outstanding_shares") and item.shareholders_equity and item.outstanding_shares]
 
     if len(book_values) < 3:
         return {"score": 0, "details": "Insufficient book value data for growth analysis"}
@@ -707,7 +787,7 @@ def analyze_pricing_power(financial_line_items: list, metrics: list) -> dict[str
     # Check gross margin trends (ability to maintain/expand margins)
     gross_margins = []
     for item in financial_line_items:
-        if hasattr(item, 'gross_margin') and item.gross_margin is not None:
+        if hasattr(item, "gross_margin") and item.gross_margin is not None:
             gross_margins.append(item.gross_margin)
 
     if len(gross_margins) >= 3:
@@ -737,21 +817,12 @@ def analyze_pricing_power(financial_line_items: list, metrics: list) -> dict[str
             score += 1
             reasoning.append(f"Good gross margins ({avg_margin:.1%}) suggest decent pricing power")
 
-    return {
-        "score": score,
-        "details": "; ".join(reasoning) if reasoning else "Limited pricing power analysis available"
-    }
+    return {"score": score, "details": "; ".join(reasoning) if reasoning else "Limited pricing power analysis available"}
 
 
-def generate_buffett_output(
-        ticker: str,
-        analysis_data: dict[str, any],
-        state: AgentState,
-        agent_id: str = "warren_buffett_agent",
-) -> WarrenBuffettSignal:
-    """Get investment decision from LLM with a compact prompt."""
+def _build_buffett_prompt_payload(ticker: str, analysis_data: dict[str, any]):
+    """Construct the Warren Buffett prompt and default factory."""
 
-    # --- Build compact facts here ---
     facts = {
         "score": analysis_data.get("score"),
         "max_score": analysis_data.get("max_score"),
@@ -792,35 +863,58 @@ def generate_buffett_output(
                 "- 30-49%: Outside my expertise or concerning fundamentals\n"
                 "- 10-29%: Poor business or significantly overvalued\n"
                 "\n"
-                "Keep reasoning under 120 characters. Do not invent data. Return JSON only."
+                "Keep reasoning under 120 characters. Do not invent data. Return JSON only.",
             ),
-            (
-                "human",
-                "Ticker: {ticker}\n"
-                "Facts:\n{facts}\n\n"
-                "Return exactly:\n"
-                "{{\n"
-                '  "signal": "bullish" | "bearish" | "neutral",\n'
-                '  "confidence": int,\n'
-                '  "reasoning": "short justification"\n'
-                "}}"
-            ),
+            ("human", "Ticker: {ticker}\n" "Facts:\n{facts}\n\n" "Return exactly:\n" "{{\n" '  "signal": "bullish" | "bearish" | "neutral",\n' '  "confidence": int,\n' '  "reasoning": "short justification"\n' "}}"),
         ]
     )
 
-    prompt = template.invoke({
-        "facts": json.dumps(facts, separators=(",", ":"), ensure_ascii=False),
-        "ticker": ticker,
-    })
+    prompt = template.invoke(
+        {
+            "facts": json.dumps(facts, separators=(",", ":"), ensure_ascii=False),
+            "ticker": ticker,
+        }
+    )
 
-    # Default fallback uses int confidence to match schema and avoid parse retries
     def create_default_warren_buffett_signal():
         return WarrenBuffettSignal(signal="neutral", confidence=50, reasoning="Insufficient data")
+
+    return prompt, create_default_warren_buffett_signal
+
+
+def generate_buffett_output(
+    ticker: str,
+    analysis_data: dict[str, any],
+    state: AgentState,
+    agent_id: str = "warren_buffett_agent",
+) -> WarrenBuffettSignal:
+    """Get investment decision from LLM with a compact prompt."""
+
+    prompt, default_factory = _build_buffett_prompt_payload(ticker, analysis_data)
 
     return call_llm(
         prompt=prompt,
         pydantic_model=WarrenBuffettSignal,
         agent_name=agent_id,
         state=state,
-        default_factory=create_default_warren_buffett_signal,
+        default_factory=default_factory,
+    )
+
+
+async def generate_buffett_output_async(
+    ticker: str,
+    analysis_data: dict[str, any],
+    state: AgentState,
+    agent_id: str = "warren_buffett_agent",
+) -> WarrenBuffettSignal:
+    """Async wrapper for generating Warren Buffett persona output."""
+
+    prompt, default_factory = _build_buffett_prompt_payload(ticker, analysis_data)
+
+    return await async_call_llm(
+        prompt=prompt,
+        pydantic_model=WarrenBuffettSignal,
+        agent_name=agent_id,
+        state=state,
+        default_factory=default_factory,
     )

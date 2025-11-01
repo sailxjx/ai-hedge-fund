@@ -1,0 +1,9 @@
+{
+  "tickers": ["TSLA"],
+  "start_date": "2021-01-15",
+  "end_date": "2021-09-30",
+  "analysts_all": true,
+  "model": "openai:gpt-4o-mini",
+  "initial_cash": 100000,
+  "log_file": "log/backtest_baseline_consolidation.log"
+}

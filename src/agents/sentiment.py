@@ -1,11 +1,34 @@
-from langchain_core.messages import HumanMessage
-from src.graph.state import AgentState, show_agent_reasoning
-from src.utils.progress import progress
-import pandas as pd
-import numpy as np
+import asyncio
 import json
+
+import numpy as np
+import pandas as pd
+from langchain_core.messages import HumanMessage
+
+from src.agents.persona_utils import (
+    async_persona_from_observations,
+    persona_from_observations,
+)
+from src.graph.state import AgentState, show_agent_reasoning
+from src.tools.api import (
+    get_company_news,
+    get_company_news_async,
+    get_insider_trades,
+    get_insider_trades_async,
+)
 from src.utils.api_key import get_api_key_from_state
-from src.tools.api import get_insider_trades, get_company_news
+from src.utils.async_state import update_analyst_signals_async
+from src.utils.progress import progress
+
+PERSONA_NAME = "Echo"
+PERSONA_ROLE = "a sentiment persona blending insider flows and news tone"
+PERSONA_BACKSTORY = "Echo tracked behavioural flows for a macro fund and now interprets insider trades and news sentiment before advising positions."
+PERSONA_INSTRUCTIONS = (
+    "Compare insider flow vs news tone; explain when they diverge.",
+    "Highlight catalyst snippets from the news when leaning bullish or bearish.",
+    "Speak in first person and cite the key datapoints driving the judgement.",
+)
+ALLOWED_SIGNALS = ["bullish", "bearish", "neutral"]
 
 
 ##### Sentiment Agent #####
@@ -42,80 +65,75 @@ def sentiment_analyst_agent(state: AgentState, agent_id: str = "sentiment_analys
 
         # Get the sentiment from the company news
         sentiment = pd.Series([n.sentiment for n in company_news]).dropna()
-        news_signals = np.where(sentiment == "negative", "bearish", 
-                              np.where(sentiment == "positive", "bullish", "neutral")).tolist()
-        
+        news_signals = np.where(sentiment == "negative", "bearish", np.where(sentiment == "positive", "bullish", "neutral")).tolist()
+
         progress.update_status(agent_id, ticker, "Combining signals")
         # Combine signals from both sources with weights
         insider_weight = 0.3
         news_weight = 0.7
-        
+
         # Calculate weighted signal counts
-        bullish_signals = (
-            insider_signals.count("bullish") * insider_weight +
-            news_signals.count("bullish") * news_weight
-        )
-        bearish_signals = (
-            insider_signals.count("bearish") * insider_weight +
-            news_signals.count("bearish") * news_weight
-        )
+        bullish_signals = insider_signals.count("bullish") * insider_weight + news_signals.count("bullish") * news_weight
+        bearish_signals = insider_signals.count("bearish") * insider_weight + news_signals.count("bearish") * news_weight
 
-        if bullish_signals > bearish_signals:
-            overall_signal = "bullish"
-        elif bearish_signals > bullish_signals:
-            overall_signal = "bearish"
-        else:
-            overall_signal = "neutral"
-
-        # Calculate confidence level based on the weighted proportion
-        total_weighted_signals = len(insider_signals) * insider_weight + len(news_signals) * news_weight
-        confidence = 0  # Default confidence when there are no signals
-        if total_weighted_signals > 0:
-            confidence = round((max(bullish_signals, bearish_signals) / total_weighted_signals) * 100, 2)
-        
-        # Create structured reasoning similar to technical analysis
-        reasoning = {
-            "insider_trading": {
-                "signal": "bullish" if insider_signals.count("bullish") > insider_signals.count("bearish") else 
-                         "bearish" if insider_signals.count("bearish") > insider_signals.count("bullish") else "neutral",
-                "confidence": round((max(insider_signals.count("bullish"), insider_signals.count("bearish")) / max(len(insider_signals), 1)) * 100),
-                "metrics": {
-                    "total_trades": len(insider_signals),
-                    "bullish_trades": insider_signals.count("bullish"),
-                    "bearish_trades": insider_signals.count("bearish"),
-                    "weight": insider_weight,
-                    "weighted_bullish": round(insider_signals.count("bullish") * insider_weight, 1),
-                    "weighted_bearish": round(insider_signals.count("bearish") * insider_weight, 1),
-                }
+        breakdown = {
+            "insider_trades": {
+                "total_trades": len(insider_signals),
+                "bullish_trades": insider_signals.count("bullish"),
+                "bearish_trades": insider_signals.count("bearish"),
+                "weighted_bullish": round(insider_signals.count("bullish") * insider_weight, 4),
+                "weighted_bearish": round(insider_signals.count("bearish") * insider_weight, 4),
+                "weight": insider_weight,
             },
             "news_sentiment": {
-                "signal": "bullish" if news_signals.count("bullish") > news_signals.count("bearish") else 
-                         "bearish" if news_signals.count("bearish") > news_signals.count("bullish") else "neutral",
-                "confidence": round((max(news_signals.count("bullish"), news_signals.count("bearish")) / max(len(news_signals), 1)) * 100),
-                "metrics": {
-                    "total_articles": len(news_signals),
-                    "bullish_articles": news_signals.count("bullish"),
-                    "bearish_articles": news_signals.count("bearish"),
-                    "neutral_articles": news_signals.count("neutral"),
-                    "weight": news_weight,
-                    "weighted_bullish": round(news_signals.count("bullish") * news_weight, 1),
-                    "weighted_bearish": round(news_signals.count("bearish") * news_weight, 1),
-                }
+                "total_articles": len(news_signals),
+                "bullish_articles": news_signals.count("bullish"),
+                "bearish_articles": news_signals.count("bearish"),
+                "neutral_articles": news_signals.count("neutral"),
+                "weighted_bullish": round(news_signals.count("bullish") * news_weight, 4),
+                "weighted_bearish": round(news_signals.count("bearish") * news_weight, 4),
+                "weight": news_weight,
             },
-            "combined_analysis": {
-                "total_weighted_bullish": round(bullish_signals, 1),
-                "total_weighted_bearish": round(bearish_signals, 1),
-                "signal_determination": f"{'Bullish' if bullish_signals > bearish_signals else 'Bearish' if bearish_signals > bullish_signals else 'Neutral'} based on weighted signal comparison"
-            }
+            "combined": {
+                "total_weighted_bullish": round(bullish_signals, 4),
+                "total_weighted_bearish": round(bearish_signals, 4),
+                "total_weighted_signals": len(insider_signals) * insider_weight + len(news_signals) * news_weight,
+            },
+            "recent_news": [{"headline": n.title, "sentiment": n.sentiment, "source": n.source} for n in company_news[:5]],
         }
 
-        sentiment_analysis[ticker] = {
-            "signal": overall_signal,
-            "confidence": confidence,
-            "reasoning": reasoning,
+        observations = {
+            "ticker": ticker,
+            "weights": {"insider": insider_weight, "news": news_weight},
+            "breakdown": breakdown,
         }
 
-        progress.update_status(agent_id, ticker, "Done", analysis=json.dumps(reasoning, indent=4))
+        decision = persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="neutral",
+            default_confidence=50.0,
+            default_reasoning="Defaulted to neutral after missing persona response.",
+        )
+
+        payload = {
+            "signal": decision.signal,
+            "confidence": int(max(0, min(round(decision.confidence), 100))),
+            "reasoning": decision.reasoning,
+            "constraints": decision.constraints or {},
+            "breakdown": breakdown,
+            "meta": {"observations": observations},
+        }
+
+        sentiment_analysis[ticker] = payload
+
+        progress.update_status(agent_id, ticker, "Done", analysis=json.dumps(payload, indent=4))
 
     # Create the sentiment message
     message = HumanMessage(
@@ -129,6 +147,120 @@ def sentiment_analyst_agent(state: AgentState, agent_id: str = "sentiment_analys
 
     # Add the signal to the analyst_signals list
     state["data"]["analyst_signals"][agent_id] = sentiment_analysis
+
+    progress.update_status(agent_id, None, "Done")
+
+    return {
+        "messages": [message],
+        "data": data,
+    }
+
+
+async def sentiment_analyst_agent_async(state: AgentState, agent_id: str = "sentiment_analyst_agent"):
+    """Async sentiment analyst combining insider and news signals."""
+    data = state.get("data", {})
+    end_date = data.get("end_date")
+    tickers = data.get("tickers")
+    api_key = get_api_key_from_state(state, "FINANCIAL_DATASETS_API_KEY")
+    sentiment_analysis = {}
+
+    for ticker in tickers:
+        progress.update_status(agent_id, ticker, "Fetching insider trades")
+
+        insider_trades = await get_insider_trades_async(
+            ticker=ticker,
+            end_date=end_date,
+            limit=1000,
+            api_key=api_key,
+        )
+
+        progress.update_status(agent_id, ticker, "Analyzing trading patterns")
+
+        transaction_shares = pd.Series([t.transaction_shares for t in insider_trades]).dropna()
+        insider_signals = np.where(transaction_shares < 0, "bearish", "bullish").tolist()
+
+        progress.update_status(agent_id, ticker, "Fetching company news")
+
+        company_news = await get_company_news_async(ticker, end_date, limit=100, api_key=api_key)
+
+        sentiment_series = pd.Series([n.sentiment for n in company_news]).dropna()
+        news_signals = np.where(sentiment_series == "negative", "bearish", np.where(sentiment_series == "positive", "bullish", "neutral")).tolist()
+
+        progress.update_status(agent_id, ticker, "Combining signals")
+
+        insider_weight = 0.3
+        news_weight = 0.7
+
+        bullish_signals = insider_signals.count("bullish") * insider_weight + news_signals.count("bullish") * news_weight
+        bearish_signals = insider_signals.count("bearish") * insider_weight + news_signals.count("bearish") * news_weight
+
+        breakdown = {
+            "insider_trades": {
+                "total_trades": len(insider_signals),
+                "bullish_trades": insider_signals.count("bullish"),
+                "bearish_trades": insider_signals.count("bearish"),
+                "weighted_bullish": round(insider_signals.count("bullish") * insider_weight, 4),
+                "weighted_bearish": round(insider_signals.count("bearish") * insider_weight, 4),
+                "weight": insider_weight,
+            },
+            "news_sentiment": {
+                "total_articles": len(news_signals),
+                "bullish_articles": news_signals.count("bullish"),
+                "bearish_articles": news_signals.count("bearish"),
+                "neutral_articles": news_signals.count("neutral"),
+                "weighted_bullish": round(news_signals.count("bullish") * news_weight, 4),
+                "weighted_bearish": round(news_signals.count("bearish") * news_weight, 4),
+                "weight": news_weight,
+            },
+            "combined": {
+                "total_weighted_bullish": round(bullish_signals, 4),
+                "total_weighted_bearish": round(bearish_signals, 4),
+                "total_weighted_signals": len(insider_signals) * insider_weight + len(news_signals) * news_weight,
+            },
+            "recent_news": [{"headline": n.title, "sentiment": n.sentiment, "source": n.source} for n in company_news[:5]],
+        }
+
+        observations = {
+            "ticker": ticker,
+            "weights": {"insider": insider_weight, "news": news_weight},
+            "breakdown": breakdown,
+        }
+
+        decision = await async_persona_from_observations(
+            state=state,
+            agent_id=agent_id,
+            persona_name=PERSONA_NAME,
+            persona_role=PERSONA_ROLE,
+            persona_backstory=PERSONA_BACKSTORY,
+            allowed_signals=ALLOWED_SIGNALS,
+            observations=observations,
+            persona_instructions=PERSONA_INSTRUCTIONS,
+            default_signal="neutral",
+            default_confidence=50.0,
+            default_reasoning="Defaulted to neutral after missing persona response.",
+        )
+
+        payload = {
+            "signal": decision.signal,
+            "confidence": int(max(0, min(round(decision.confidence), 100))),
+            "reasoning": decision.reasoning,
+            "constraints": decision.constraints or {},
+            "breakdown": breakdown,
+            "meta": {"observations": observations},
+        }
+
+        sentiment_analysis[ticker] = payload
+        progress.update_status(agent_id, ticker, "Done", analysis=json.dumps(payload, indent=4))
+
+    message = HumanMessage(
+        content=json.dumps(sentiment_analysis),
+        name=agent_id,
+    )
+
+    if state["metadata"].get("show_reasoning"):
+        show_agent_reasoning(sentiment_analysis, "Sentiment Analysis Agent")
+
+    await update_analyst_signals_async(state, agent_id, sentiment_analysis)
 
     progress.update_status(agent_id, None, "Done")
 

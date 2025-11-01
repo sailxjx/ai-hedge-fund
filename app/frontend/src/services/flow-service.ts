@@ -1,6 +1,5 @@
+import { API_BASE_URL } from '@/services/api-config';
 import { Flow } from '@/types/flow';
-
-const API_BASE_URL = 'http://localhost:8000';
 
 export interface CreateFlowRequest {
   name: string;

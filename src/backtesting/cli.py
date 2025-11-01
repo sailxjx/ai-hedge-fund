@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 from datetime import datetime
-from dateutil.relativedelta import relativedelta
-import argparse
 
-from colorama import Fore, Style, init
 import questionary
+from colorama import Fore, init, Style
+from dateutil.relativedelta import relativedelta
+
+from src.llm.models import get_model_info, LLM_ORDER, ModelProvider, OLLAMA_LLM_ORDER
+from src.main import run_hedge_fund, run_hedge_fund_async
+from src.utils.analysts import ANALYST_ORDER
+from src.utils.ollama import ensure_ollama_and_model
+from src.utils.runtime import async_personas_enabled
 
 from .engine import BacktestEngine
-from src.llm.models import LLM_ORDER, OLLAMA_LLM_ORDER, get_model_info, ModelProvider
-from src.utils.analysts import ANALYST_ORDER
-from src.main import run_hedge_fund
-from src.utils.ollama import ensure_ollama_and_model
 
 
 def main() -> int:
@@ -31,13 +34,35 @@ def main() -> int:
         help="Start date YYYY-MM-DD",
     )
     parser.add_argument("--initial-capital", type=float, default=100000)
+    parser.add_argument(
+        "--initial-long-pct",
+        type=float,
+        default=0.0,
+        help="Percentage of available cash to deploy into long positions at the start of the backtest (0-100).",
+    )
     parser.add_argument("--margin-requirement", type=float, default=0.0)
     parser.add_argument("--analysts", type=str, required=False)
     parser.add_argument("--analysts-all", action="store_true")
     parser.add_argument("--ollama", action="store_true")
+    parser.add_argument("--portfolio-seed", type=str, help="Path to a JSON portfolio snapshot")
 
     args = parser.parse_args()
     init(autoreset=True)
+
+    seed_snapshot = None
+    if args.portfolio_seed:
+        try:
+            with open(args.portfolio_seed, "r", encoding="utf-8") as handle:
+                seed_snapshot = json.load(handle)
+        except FileNotFoundError:
+            print(f"{Fore.RED}Portfolio seed file not found: {args.portfolio_seed}{Style.RESET_ALL}")
+            return 1
+        except json.JSONDecodeError as exc:
+            print(f"{Fore.RED}Invalid portfolio seed JSON: {exc}{Style.RESET_ALL}")
+            return 1
+        except OSError as exc:
+            print(f"{Fore.RED}Failed to read portfolio seed: {exc}{Style.RESET_ALL}")
+            return 1
 
     tickers = [t.strip() for t in args.tickers.split(",")] if args.tickers else []
 
@@ -66,10 +91,7 @@ def main() -> int:
             print("\n\nInterrupt received. Exiting...")
             return 1
         selected_analysts = choices
-        print(
-            f"\nSelected analysts: "
-            f"{', '.join(Fore.GREEN + choice.title().replace('_', ' ') + Style.RESET_ALL for choice in choices)}\n"
-        )
+        print(f"\nSelected analysts: " f"{', '.join(Fore.GREEN + choice.title().replace('_', ' ') + Style.RESET_ALL for choice in choices)}\n")
 
     # Model selection simplified: default to first ordered model or Ollama flag
     if args.ollama:
@@ -98,9 +120,7 @@ def main() -> int:
             print(f"{Fore.RED}Cannot proceed without Ollama and the selected model.{Style.RESET_ALL}")
             return 1
         model_provider = ModelProvider.OLLAMA.value
-        print(
-            f"\nSelected {Fore.CYAN}Ollama{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n"
-        )
+        print(f"\nSelected {Fore.CYAN}Ollama{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n")
     else:
         model_choice = questionary.select(
             "Select your LLM model:",
@@ -124,12 +144,11 @@ def main() -> int:
             if not model_name:
                 print("\n\nInterrupt received. Exiting...")
                 return 1
-        print(
-            f"\nSelected {Fore.CYAN}{model_provider}{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n"
-        )
+        print(f"\nSelected {Fore.CYAN}{model_provider}{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n")
 
+    agent_callable = run_hedge_fund_async if async_personas_enabled() else run_hedge_fund
     engine = BacktestEngine(
-        agent=run_hedge_fund,
+        agent=agent_callable,
         tickers=tickers,
         start_date=args.start_date,
         end_date=args.end_date,
@@ -138,6 +157,8 @@ def main() -> int:
         model_provider=model_provider,
         selected_analysts=selected_analysts,
         initial_margin_requirement=args.margin_requirement,
+        portfolio_seed=seed_snapshot,
+        initial_long_pct=args.initial_long_pct,
     )
 
     metrics = engine.run_backtest()
@@ -166,7 +187,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-
-

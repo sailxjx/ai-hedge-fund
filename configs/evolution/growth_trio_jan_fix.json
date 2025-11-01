@@ -1,0 +1,23 @@
+{
+  "generation_id": "gen-001",
+  "arena_run_id": "arena-oct24-trio-retest",
+  "model_provider": "azure",
+  "prompt_revision": "baseline_v1",
+  "diversity_guard": true,
+  "analyst_overlap_threshold": 0.8,
+  "weight_similarity_threshold": 0.9,
+  "genome_registry_path": "log/genomes",
+  "log_dir": "log/arena/gen-001/trio_jan_fix",
+  "experiments": [
+    {
+      "label": "growth_regression_202501_fix",
+      "tickers": ["TSLA", "NVDA", "GOOGL"],
+      "start_date": "2025-01-06",
+      "end_date": "2025-01-12",
+      "analysts_all": false,
+      "analysts": ["cathie_wood", "peter_lynch", "growth_momentum", "momentum_guardian"],
+      "genome_id": "genome_growth_v1",
+      "note": "trio regression rerun with prompt guards"
+    }
+  ]
+}

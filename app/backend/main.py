@@ -1,11 +1,13 @@
+import asyncio
+import logging
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import logging
-import asyncio
 
-from app.backend.routes import api_router
 from app.backend.database.connection import engine
 from app.backend.database.models import Base
+from app.backend.routes import api_router
 from app.backend.services.ollama_service import ollama_service
 
 # Configure logging
@@ -17,11 +19,25 @@ app = FastAPI(title="AI Hedge Fund API", description="Backend API for AI Hedge F
 # Initialize database tables (this is safe to run multiple times)
 Base.metadata.create_all(bind=engine)
 
-# Configure CORS
+# Configure CORS with environment overrides so the frontend can run from any host
+raw_origins = os.getenv("CORS_ALLOWED_ORIGINS")
+if raw_origins:
+    allow_origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+else:
+    # Default to allow all origins so the app is reachable off the local machine
+    allow_origins = ["*"]
+
+allow_credentials = os.getenv("CORS_ALLOW_CREDENTIALS", "false").lower() == "true"
+
+if "*" in allow_origins:
+    # Starlette disallows credentials with wildcard origins
+    allow_origins = ["*"]
+    allow_credentials = False
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # Frontend URLs
-    allow_credentials=True,
+    allow_origins=allow_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -29,13 +45,14 @@ app.add_middleware(
 # Include all routes
 app.include_router(api_router)
 
+
 @app.on_event("startup")
 async def startup_event():
     """Startup event to check Ollama availability."""
     try:
         logger.info("Checking Ollama availability...")
         status = await ollama_service.check_ollama_status()
-        
+
         if status["installed"]:
             if status["running"]:
                 logger.info(f"✓ Ollama is installed and running at {status['server_url']}")
@@ -49,7 +66,7 @@ async def startup_event():
         else:
             logger.info("ℹ Ollama is not installed. Install it to use local models.")
             logger.info("ℹ Visit https://ollama.com to download and install Ollama")
-            
+
     except Exception as e:
         logger.warning(f"Could not check Ollama status: {e}")
         logger.info("ℹ Ollama integration is available if you install it later")

@@ -1,0 +1,23 @@
+{
+  "generation_id": "gen-001",
+  "arena_run_id": "arena-oct24-blend-reg",
+  "model_provider": "azure",
+  "prompt_revision": "baseline_v1",
+  "diversity_guard": true,
+  "analyst_overlap_threshold": 0.8,
+  "weight_similarity_threshold": 0.9,
+  "genome_registry_path": "log/genomes",
+  "log_dir": "log/arena/gen-001/blend_v3/regression",
+  "experiments": [
+    {
+      "label": "growth_blend_v3_regression_202501",
+      "tickers": ["TSLA", "NVDA", "GOOGL"],
+      "start_date": "2025-01-06",
+      "end_date": "2025-01-12",
+      "analysts_all": false,
+      "analysts": ["cathie_wood", "peter_lynch", "growth_momentum", "momentum_guardian"],
+      "genome_id": "genome_growth_blend_v3",
+      "note": "blend v3 regression jan"
+    }
+  ]
+}

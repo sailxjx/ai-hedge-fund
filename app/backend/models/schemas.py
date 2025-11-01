@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta
-from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Dict, Any
-from src.llm.models import ModelProvider
 from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field, field_validator
+
 from app.backend.services.graph import extract_base_agent_key
+from src.llm.models import ModelProvider
 
 
 class FlowRunStatus(str, Enum):
@@ -24,11 +26,11 @@ class PortfolioPosition(BaseModel):
     quantity: float
     trade_price: float
 
-    @field_validator('trade_price')
+    @field_validator("trade_price")
     @classmethod
     def price_must_be_positive(cls, v: float) -> float:
         if v <= 0:
-            raise ValueError('Trade price must be positive!')
+            raise ValueError("Trade price must be positive!")
         return v
 
 
@@ -68,6 +70,7 @@ class BaseHedgeFundRequest(BaseModel):
     margin_requirement: float = 0.0
     portfolio_positions: Optional[List[PortfolioPosition]] = None
     api_keys: Optional[Dict[str, str]] = None
+    initial_long_pct: float = 0.0
 
     def get_agent_ids(self) -> List[str]:
         """Extract agent IDs from graph structure"""
@@ -78,15 +81,12 @@ class BaseHedgeFundRequest(BaseModel):
         if self.agent_models:
             # Extract base agent key from unique node ID for matching
             base_agent_key = extract_base_agent_key(agent_id)
-            
+
             for config in self.agent_models:
                 # Check both unique node ID and base agent key for matches
                 config_base_key = extract_base_agent_key(config.agent_id)
                 if config.agent_id == agent_id or config_base_key == base_agent_key:
-                    return (
-                        config.model_name or self.model_name,
-                        config.model_provider or self.model_provider
-                    )
+                    return (config.model_name or self.model_name, config.model_provider or self.model_provider)
         # Fallback to global model settings
         return self.model_name, self.model_provider
 
@@ -182,6 +182,7 @@ class FlowResponse(BaseModel):
 
 class FlowSummaryResponse(BaseModel):
     """Lightweight flow response without nodes/edges for listing"""
+
     id: int
     name: str
     description: Optional[str]
@@ -197,11 +198,13 @@ class FlowSummaryResponse(BaseModel):
 # Flow Run schemas
 class FlowRunCreateRequest(BaseModel):
     """Request to create a new flow run"""
+
     request_data: Optional[Dict[str, Any]] = None
 
 
 class FlowRunUpdateRequest(BaseModel):
     """Request to update an existing flow run"""
+
     status: Optional[FlowRunStatus] = None
     results: Optional[Dict[str, Any]] = None
     error_message: Optional[str] = None
@@ -209,6 +212,7 @@ class FlowRunUpdateRequest(BaseModel):
 
 class FlowRunResponse(BaseModel):
     """Complete flow run response"""
+
     id: int
     flow_id: int
     status: FlowRunStatus
@@ -227,6 +231,7 @@ class FlowRunResponse(BaseModel):
 
 class FlowRunSummaryResponse(BaseModel):
     """Lightweight flow run response for listing"""
+
     id: int
     flow_id: int
     status: FlowRunStatus
@@ -243,6 +248,7 @@ class FlowRunSummaryResponse(BaseModel):
 # API Key schemas
 class ApiKeyCreateRequest(BaseModel):
     """Request to create or update an API key"""
+
     provider: str = Field(..., min_length=1, max_length=100)
     key_value: str = Field(..., min_length=1)
     description: Optional[str] = None
@@ -251,6 +257,7 @@ class ApiKeyCreateRequest(BaseModel):
 
 class ApiKeyUpdateRequest(BaseModel):
     """Request to update an existing API key"""
+
     key_value: Optional[str] = Field(None, min_length=1)
     description: Optional[str] = None
     is_active: Optional[bool] = None
@@ -258,6 +265,7 @@ class ApiKeyUpdateRequest(BaseModel):
 
 class ApiKeyResponse(BaseModel):
     """Complete API key response"""
+
     id: int
     provider: str
     key_value: str
@@ -273,6 +281,7 @@ class ApiKeyResponse(BaseModel):
 
 class ApiKeySummaryResponse(BaseModel):
     """API key response without the actual key value"""
+
     id: int
     provider: str
     is_active: bool
@@ -288,4 +297,5 @@ class ApiKeySummaryResponse(BaseModel):
 
 class ApiKeyBulkUpdateRequest(BaseModel):
     """Request to update multiple API keys at once"""
+
     api_keys: List[ApiKeyCreateRequest]

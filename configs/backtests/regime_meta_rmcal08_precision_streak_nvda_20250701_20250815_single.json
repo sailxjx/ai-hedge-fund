@@ -1,0 +1,17 @@
+{
+  "model_provider": "azure",
+  "timeout_seconds": 9000,
+  "experiments": [
+    {
+      "label": "nvda_regime_meta_rmcal08_precision_streak_20250701_20250815",
+      "tickers": ["NVDA"],
+      "start_date": "2025-07-01",
+      "end_date": "2025-08-15",
+      "log_path": "log/backtest_nvda_regime_meta_rmcal08_precision_streak_20250701_20250815.log",
+      "prompt_revision": "regime_meta_rmcal08",
+      "analysts_all": true,
+      "baseline_label": "nvda_regime_meta_rmcal08_precision_20250701_20250815",
+      "note": "rmcal08_precision_streak"
+    }
+  ]
+}

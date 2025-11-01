@@ -24,4 +24,3 @@ def test_trade_executor_guards_and_unknown_action(portfolio):
     assert ex.execute_trade("AAPL", "buy", 0, 10.0, portfolio) == 0
     assert ex.execute_trade("AAPL", "buy", -5, 10.0, portfolio) == 0
     assert ex.execute_trade("AAPL", "unknown", 10, 10.0, portfolio) == 0
-

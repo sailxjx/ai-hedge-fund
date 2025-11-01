@@ -1,4 +1,8 @@
-from src.backtesting.valuation import calculate_portfolio_value, compute_exposures, compute_portfolio_summary
+from src.backtesting.valuation import (
+    calculate_portfolio_value,
+    compute_exposures,
+    compute_portfolio_summary,
+)
 
 
 def test_calculate_portfolio_value(portfolio, prices):
@@ -46,4 +50,4 @@ def test_compute_portfolio_summary(portfolio, prices):
     assert summary["total_value"] == total_value
     assert summary["return_pct"] == 0.0
     assert summary["sharpe_ratio"] == 1.0
-
+    assert summary["turnover_rate"] is None

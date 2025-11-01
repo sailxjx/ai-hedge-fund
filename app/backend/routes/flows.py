@@ -1,16 +1,17 @@
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
 from typing import List
 
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
 from app.backend.database import get_db
-from app.backend.repositories.flow_repository import FlowRepository
 from app.backend.models.schemas import (
-    FlowCreateRequest, 
-    FlowUpdateRequest, 
-    FlowResponse, 
+    ErrorResponse,
+    FlowCreateRequest,
+    FlowResponse,
     FlowSummaryResponse,
-    ErrorResponse
+    FlowUpdateRequest,
 )
+from app.backend.repositories.flow_repository import FlowRepository
 
 router = APIRouter(prefix="/flows", tags=["flows"])
 
@@ -27,16 +28,7 @@ async def create_flow(request: FlowCreateRequest, db: Session = Depends(get_db))
     """Create a new hedge fund flow"""
     try:
         repo = FlowRepository(db)
-        flow = repo.create_flow(
-            name=request.name,
-            description=request.description,
-            nodes=request.nodes,
-            edges=request.edges,
-            viewport=request.viewport,
-            data=request.data,
-            is_template=request.is_template,
-            tags=request.tags
-        )
+        flow = repo.create_flow(name=request.name, description=request.description, nodes=request.nodes, edges=request.edges, viewport=request.viewport, data=request.data, is_template=request.is_template, tags=request.tags)
         return FlowResponse.from_orm(flow)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create flow: {str(e)}")
@@ -93,17 +85,7 @@ async def update_flow(flow_id: int, request: FlowUpdateRequest, db: Session = De
     """Update an existing flow"""
     try:
         repo = FlowRepository(db)
-        flow = repo.update_flow(
-            flow_id=flow_id,
-            name=request.name,
-            description=request.description,
-            nodes=request.nodes,
-            edges=request.edges,
-            viewport=request.viewport,
-            data=request.data,
-            is_template=request.is_template,
-            tags=request.tags
-        )
+        flow = repo.update_flow(flow_id=flow_id, name=request.name, description=request.description, nodes=request.nodes, edges=request.edges, viewport=request.viewport, data=request.data, is_template=request.is_template, tags=request.tags)
         if not flow:
             raise HTTPException(status_code=404, detail="Flow not found")
         return FlowResponse.from_orm(flow)
@@ -171,4 +153,4 @@ async def search_flows(name: str, db: Session = Depends(get_db)):
         flows = repo.get_flows_by_name(name)
         return [FlowSummaryResponse.from_orm(flow) for flow in flows]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to search flows: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Failed to search flows: {str(e)}")

@@ -308,5 +308,3 @@ def test_long_short_strategy_dca_both_sides():
     assert final_portfolio_value == expected_total_value
     # Mixed book remains -> non-zero position value magnitude
     assert abs(portfolio_summary["total_position_value"]) > 0.0
-
-
